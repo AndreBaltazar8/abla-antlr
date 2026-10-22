@@ -1,0 +1,48 @@
+import "abla/io"
+import "abla/fs"
+import "abla/process"
+import "abla/text"
+import "../src/antlr.ab"
+
+// suite-run DIR GRAMMAR TYPE START_RULE SHOW_DFA DIAGNOSTICS: runs one test of
+// ANTLR's runtime testsuite the way its JavaScript harness does, printing the
+// program output to stdout and the error listener output to stderr.
+
+fun tokenString(t: AntlrToken): string {
+    val txt = t.text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    val channel = if (t.channel > 0) ",channel=${t.channel}" else ""
+    "[@${t.tokenIndex},${t.start}:${t.stop}='$txt',<${t.type}>$channel,${t.line}:${t.column}]"
+}
+
+fun main: int {
+    val dir = processArgument(0)
+    val name = processArgument(1)
+    val kind = processArgument(2)
+    val startRule = processArgument(3)
+    val showDfa = processArgument(4) == "1"
+    val sources: Map<string, string> = Map()
+    for (e in path(dir).entries()) {
+        val n = e.name()
+        if (n.endsWith(".g4")) sources.set(n, e.readText())
+    }
+    val input = path(dir + "/input").readText()
+    val lexerOnly = kind == "Lexer" || kind == "CompositeLexer"
+    val antlr = antlrLoadGrammars(sources, name, if (lexerOnly) "" else name)
+    if (antlr.error.size > 0) {
+        eprintln("load: ${antlr.error}")
+        return 2
+    }
+    antlr.codePoints = true
+    val out = bufferedStandardOutput()
+    if (lexerOnly) {
+        val tokens = antlr.tokenize(input)
+        for (e in tokens.errors) eprintln("line ${e.line}:${e.column} ${e.message}")
+        for (t in tokens.tokens) out.writeLine(tokenString(t))
+        if (showDfa) out.write(antlr.lexerDfaText(0))
+    } else {
+        val result = antlr.parse(input, startRule)
+        for (e in result.messages) eprintln("line ${e.line}:${e.column} ${e.message}")
+    }
+    out.flush()
+    0
+}

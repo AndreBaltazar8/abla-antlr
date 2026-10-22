@@ -222,6 +222,7 @@ fun readSets(var r: AtnReader, var sets: array<IntervalSet>, wide: bool): void {
 fun failedAtn(message: string): Atn = Atn(-1, 0, [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], message)
 
 fun deserializeAtn(raw: array<int>): Atn {
+    if (raw.size < 12) return failedAtn("no serialized ATN")
     val data: array<int> = []
     for (i in 0 until raw.size) {
         val v = raw[i]

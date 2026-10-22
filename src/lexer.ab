@@ -46,6 +46,17 @@ fun copyInts(xs: array<int>): array<int> {
     result
 }
 
+class AntlrToken(
+    val type: int,
+    val text: string,
+    val line: int,
+    val column: int,
+    val channel: int,
+    val tokenIndex: int,
+    val start: int,
+    val stop: int
+)
+
 class LexError(val line: int, val column: int, val message: string)
 
 // Source text as UTF-16 code units, with the byte offset of each unit so token
@@ -548,8 +559,8 @@ class Lexer(
             index = prevIndex
             line = prevLine
             column = prevColumn
-            execute(atn, dfas[mode].states[st].executor)
             result = dfas[mode].states[st].prediction
+            execute(atn, dfas[mode].states[st].executor)
         } else if (t == tokenEof && index == startIndex) result = tokenEof
         else {
             val text = input.getText(tokenStartIndex, index)
@@ -618,6 +629,8 @@ class Lexer(
             }
         }
     }
+
+    fun tokenAt(t: int): AntlrToken = AntlrToken(out.type[t], out.text[t], out.line[t], out.column[t], out.channel[t], out.tokenIndex[t], out.start[t], out.stop[t])
 
     fun tokenizeAll(atn: Atn): void {
         var going = true

@@ -31,9 +31,12 @@ fun parserScriptTables(out: G4Output, interp: InterpFile): ScriptTables {
     val t = scriptTables()
     t.tokenTypes = tokenTypesOf(interp)
     if (out.parserMembers.size > 0) t.members = t.code.parseStatements(actionBody(out.parserMembers))
-    for (p in out.parserPredicates) {
+    for (i in 0 until out.parserPredicates.size) {
+        val p = out.parserPredicates[i]
         t.predicates.append(t.code.parseExpression(actionBody(p)))
         t.predicateTexts.append(actionBody(p))
+        val fail = out.parserPredicateFails[i]
+        t.predicateFails.append(if (fail.size > 0) t.code.parseExpression(actionBody(fail)) else -1)
     }
     for (i in 0 until out.parserActionStates.size) t.actionAt.set(out.parserActionStates[i], t.code.parseStatements(actionBody(out.parserActions[i])))
     for (r in 0 until out.ruleInit.size) {

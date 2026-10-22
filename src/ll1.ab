@@ -6,7 +6,9 @@ import "intervalset.ab"
 
 val hitPred = 0
 
-class LookWalk(var busy: Map<int, bool>, var called: array<bool>, val stopState: int, val seeThruPreds: bool, val addEof: bool)
+// toolEof: the tool's ATN, where the stop state of a rule nothing calls has
+// an EOF transition (addEOFTransitionToStartRules) that isn't serialized
+class LookWalk(var busy: Map<int, bool>, var called: array<bool>, val stopState: int, val seeThruPreds: bool, val addEof: bool, val toolEof: bool)
 
 fun lookRec(atn: Atn, var contexts: ContextPool, var w: LookWalk, var look: IntervalSet, s: int, ctx: int): void {
     val key = s * 4294967296 + (ctx + 1)
@@ -26,6 +28,10 @@ fun lookRec(atn: Atn, var contexts: ContextPool, var w: LookWalk, var look: Inte
             look.addOne(tokenEpsilon)
             return
         } else if (contexts.isEmpty(ctx) && w.addEof) {
+            look.addOne(tokenEof)
+            return
+        }
+        if (w.toolEof && atn.stateTrans[s].size == 0) {
             look.addOne(tokenEof)
             return
         }
@@ -69,15 +75,15 @@ fun lookRec(atn: Atn, var contexts: ContextPool, var w: LookWalk, var look: Inte
     }
 }
 
-fun lookWalk(atn: Atn, stopState: int, seeThruPreds: bool, addEof: bool): LookWalk {
+fun lookWalk(atn: Atn, stopState: int, seeThruPreds: bool, addEof: bool, toolEof: bool): LookWalk {
     val rules = atn.ruleToStart.size
-    LookWalk(Map(), filledArray(rules, false), stopState, seeThruPreds, addEof)
+    LookWalk(Map(), filledArray(rules, false), stopState, seeThruPreds, addEof, toolEof)
 }
 
 // LL1Analyzer.LOOK(s, stopState, ctx) with ctx already a prediction context
 // (ctxNull when there is no rule context).
 fun lookahead(atn: Atn, var contexts: ContextPool, s: int, stopState: int, ctx: int): IntervalSet {
-    val w = lookWalk(atn, stopState, true, true)
+    val w = lookWalk(atn, stopState, true, true, false)
     val look = intervalSet()
     lookRec(atn, contexts, w, look, s, ctx)
     look
@@ -88,7 +94,7 @@ fun lookahead(atn: Atn, var contexts: ContextPool, s: int, stopState: int, ctx: 
 fun decisionLookahead(atn: Atn, var contexts: ContextPool, s: int): array<IntervalSet?> {
     val result: array<IntervalSet?> = []
     for (t in atn.stateTrans[s]) {
-        val w = lookWalk(atn, -1, false, false)
+        val w = lookWalk(atn, -1, false, false, true)
         val look = intervalSet()
         lookRec(atn, contexts, w, look, atn.transTarget[t], ctxEmpty)
         if (look.isNil() || look.contains(hitPred)) result.append(null)

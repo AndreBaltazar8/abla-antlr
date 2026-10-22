@@ -305,7 +305,7 @@ fun Engine.execOp(g: ParserGrammar, op: int): bool {
         if (!precpred(prog.a[op])) ok = throwFailedPredicate("failed predicate: {this.precpred(this._ctx, ${prog.a[op]})}?")
     } else if (k == opSempred) {
         state = prog.state[op]
-        if (g.atn.script.enabled && !testPredicate(g, prog.b[op], cur)) ok = throwFailedPredicate("failed predicate: {${predicateText(g, prog.b[op])}}?")
+        if (g.atn.script.enabled && !testPredicate(g, prog.b[op], cur)) ok = throwFailedPredicate(failedPredicateMessage(g, prog.b[op]))
     } else if (k == opAction) {
         state = prog.state[op]
         if (g.atn.script.enabled) runAction(g, prog.state[op])

@@ -53,7 +53,8 @@ class G4Grammar(
     var modeRules: array<array<int>>,
     var litRuleNumber: int,
     var sempreds: array<int>,
-    var lexerActions: array<int>
+    var lexerActions: array<int>,
+    var lrLabels: Map<string, string>
 ) {
     fun isLexer(): bool = kind == gkLexer
 
@@ -190,7 +191,7 @@ fun g4Grammar(name: string, kind: int, root: int, sr: int): G4Grammar {
     tokenNames.set("EOF", -1)
     val typeToToken: array<string?> = [null]
     G4Grammar(name, kind, root, sr, -1, [], tokenNames, Map(), [], typeToToken, 0, Map(), [], 1,
-        [], [], [], [], [], [], Map(), [], [], 0, [], [])
+        [], [], [], [], [], [], Map(), [], [], 0, [], [], Map())
 }
 
 class G4Tool(
@@ -842,6 +843,14 @@ fun G4Tool.translateLeftRecursive(gi: int, r: int): bool {
             if (a != null && a == "right") right = true
         }
         val tree = ast.dupTree(original)
+        if (kind == lrBinary || kind == lrSuffix) {
+            var first = ast.child(original, 0)
+            if (ast.type[first] == gtElementOptions) first = ast.child(original, 1)
+            if (ast.type[first] == gtAssign || ast.type[first] == gtPlusAssign) {
+                val list = if (ast.type[first] == gtPlusAssign) "+" else ""
+                grammars[gi].lrLabels.set("$r:$prec", list + ast.text[ast.child(first, 0)])
+            }
+        }
         if (kind == lrBinary) {
             stripLeftRecursion(tree, name)
             stripAltLabel(tree)
@@ -1038,6 +1047,7 @@ class G4Output(
     var lexerActions: array<string>,
     var lexerPredicates: array<string>,
     var parserPredicates: array<string>,
+    var parserPredicateFails: array<string>,
     var parserActionStates: array<int>,
     var parserActions: array<string>,
     var lexerMembers: string,
@@ -1054,7 +1064,7 @@ class G4Output(
     var error: string
 )
 
-fun g4Output(): G4Output = G4Output("", "", "", [], [], [], [], [], "", "", [], [], [], [], [], [], [], [], [], "")
+fun g4Output(): G4Output = G4Output("", "", "", [], [], [], [], [], [], "", "", [], [], [], [], [], [], [], [], [], "")
 
 // Grammar.defineAction: the grammar-level named action, last definition kept
 fun G4Tool.namedAction(gi: int, name: string): string {

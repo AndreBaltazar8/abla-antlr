@@ -20,7 +20,9 @@ for (const t of tests) {
   for (const s of t.slaves || []) writeFileSync(`${dir}/${s.name}.g4`, s.rendered);
   writeFileSync(`${dir}/input`, t.input ?? "");
   const r = spawnSync(runner, [dir, t.grammarName, t.type, t.startRule ?? "", t.showDFA ? "1" : "0", t.showDiagnosticErrors ? "1" : "0"], { encoding: "utf8", timeout: 60000 });
-  const out = r.stdout ?? "", err = r.stderr ?? "";
+  // as the testsuite's StreamVacuum reads them: line by line, each line ended by \n
+  const lines = s => s.length === 0 ? "" : s.split(/\r\n|\r|\n/).slice(0, s.match(/(\r\n|\r|\n)$/) ? -1 : undefined).map(l => l + "\n").join("");
+  const out = lines(r.stdout ?? ""), err = lines(r.stderr ?? "");
   const wantOut = t.output ?? "", wantErr = t.errors ?? "";
   const ok = r.status === 0 && out === wantOut && err === wantErr;
   const g = (byGroup[t.group] ??= { pass: 0, fail: 0 });

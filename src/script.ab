@@ -588,6 +588,7 @@ class ScriptTables(
     var lexerActions: array<int>,
     var predicates: array<int>,
     var predicateTexts: array<string>,
+    var predicateFails: array<int>,
     var actionAt: Map<int, int>,
     var ruleInit: array<int>,
     var ruleAfter: array<int>,
@@ -604,7 +605,7 @@ class ScriptTables(
     var altLabels: array<array<string>>
 )
 
-fun scriptTables(): ScriptTables = ScriptTables(scriptCode(), false, -1, [], [], [], Map(), [], [], [], [], [], [], [], Map(), Map(), Map(), Map(), Map(), [])
+fun scriptTables(): ScriptTables = ScriptTables(scriptCode(), false, -1, [], [], [], [], Map(), [], [], [], [], [], [], [], Map(), Map(), Map(), Map(), Map(), [])
 
 // The text of {...} or {...}? without its delimiters.
 fun actionBody(text: string): string {

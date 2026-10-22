@@ -507,11 +507,19 @@ fun actionIsContextDependent(text: string): bool {
     dep
 }
 
-fun G4Tool.fSempred(var atn: G4Atn, n: int): H {
+fun G4Tool.fSempred(gi: int, var atn: G4Atn, n: int): H {
     val left = atn.basic()
     val right = atn.basic()
     val p = ast.optionString(n, "p")
-    if (p != null) atn.add(left, trPrecedence, right, parseDecimal(p), 0, 0, -1, null)
+    if (p != null) {
+        val prec = parseDecimal(p)
+        atn.add(left, trPrecedence, right, prec, 0, 0, -1, null)
+        val label = grammars[gi].lrLabels.get("${atn.currentRule}:$prec")
+        if (label != null) {
+            if (label.startsWith("+")) atn.info(left, infoListLabel, label.slice(1, label.size))
+            else atn.info(left, infoLabel, label)
+        }
+    }
     else {
         val idx = atn.predIndex.get(n)
         val pi = if (idx == null) -1 else idx
@@ -690,7 +698,7 @@ fun G4Tool.fElement(gi: int, var atn: G4Atn, n: int): H {
     if (t == gtOptional || t == gtClosure || t == gtPositiveClosure) return fBlock(gi, atn, ast.child(n, 0), n)
     if (t == gtBlock) return fBlock(gi, atn, n, -1)
     if (t == gtAction) return fAction(atn, n)
-    if (t == gtSempred) return fSempred(atn, n)
+    if (t == gtSempred) return fSempred(gi, atn, n)
     if (t == gtNot) return fSet(gi, atn, ast.child(n, 0), true)
     if (t == gtLexerCharSet) return fCharSet(atn, n)
     fail("unexpected element ${ast.text[n]}")

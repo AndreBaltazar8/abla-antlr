@@ -366,6 +366,11 @@ fun Engine.hostMethodCall(aux: ParserGrammar, obj: SVal, name: string, args: arr
 }
 
 fun Engine.hostGlobal(aux: ParserGrammar, name: string): SVal {
+    if (evalCtx >= 0) {
+        if (name == "localctx") return svCtxRef(evalCtx)
+        // a rule's arguments are the generated function's parameters
+        if (attrIndex(evalCtx, name) >= 0) return attrValue(evalCtx, name)
+    }
     if (name.endsWith("Parser") || name.endsWith("Lexer") || name == "Parser") return svHostObject("vocabulary", 0)
     failures.append("unknown name $name")
     svUndef()
@@ -416,8 +421,16 @@ fun Engine.testPredicate(g: ParserGrammar, predIndex: int, ctx: int): bool {
     ok
 }
 
-fun Engine.predicateText(g: ParserGrammar, predIndex: int): string =
-    if (predIndex >= 0 && predIndex < g.atn.script.predicateTexts.size) g.atn.script.predicateTexts[predIndex] else ""
+// FailedPredicateException's message: the fail option's, or the predicate's text
+fun Engine.failedPredicateMessage(g: ParserGrammar, predIndex: int): string {
+    val t = g.atn.script
+    if (predIndex < 0 || predIndex >= t.predicateTexts.size) return "failed predicate: {}?"
+    if (t.predicateFails[predIndex] >= 0) {
+        evalCtx = cur
+        return scriptString(g, scriptValue(g, t.code, t.predicateFails[predIndex]))
+    }
+    "failed predicate: {${t.predicateTexts[predIndex]}}?"
+}
 
 // the arguments of the rule invoked from state s, in the caller's context
 fun Engine.callArguments(g: ParserGrammar, s: int): array<SVal> {
@@ -598,12 +611,12 @@ fun Engine.exitListener(g: ParserGrammar, c: int): void {
             output.append(tokText(ints[0]) + "\n")
         }
     } else if (listenerKind == "lrWithLabels") {
-        if (name == "call") {
+        if (name.lowercase() == "call") {
             val es = childRules(g, c, indexOfName(g.ruleNames, "e"))
             val lists = childRules(g, c, indexOfName(g.ruleNames, "eList"))
             val list = if (lists.size > 0) contextString(lists[0]) else "null"
             output.append(startText(es[0]) + " " + list + "\n")
-        } else if (name == "int") {
+        } else if (name.lowercase() == "int") {
             val ints = childTokens(c, tokenTypeOf(g, "INT"))
             output.append(tokText(ints[0]) + "\n")
         }

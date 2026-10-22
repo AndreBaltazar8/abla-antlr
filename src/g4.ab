@@ -67,7 +67,12 @@ fun G4Tool.processNonCombined(gi: int, var out: G4Output): string {
     if (error.size > 0) return ""
     val lexer = grammars[gi].kind == gkLexer
     for (n in grammars[gi].sempreds) {
-        if (lexer) out.lexerPredicates.append(ast.text[n]) else out.parserPredicates.append(ast.text[n])
+        if (lexer) out.lexerPredicates.append(ast.text[n])
+        else {
+            out.parserPredicates.append(ast.text[n])
+            val fail = ast.optionNode(n, "fail")
+            out.parserPredicateFails.append(if (fail >= 0) ast.text[fail] else "")
+        }
     }
     val num: array<int> = []
     var count = 0

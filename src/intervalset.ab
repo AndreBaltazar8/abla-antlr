@@ -1,0 +1,256 @@
+// Interval sets with the antlr4 JavaScript runtime's algorithms, so printed
+// sets (error messages) come out element for element the same.
+
+val tokenEof = -1
+val tokenEpsilon = -2
+val tokenInvalidType = 0
+val tokenMinUserType = 1
+
+class IntervalSet(var starts: array<int>, var stops: array<int>) {
+    fun isNil(): bool = starts.size == 0
+
+    fun contains(item: int): bool {
+        var found = false
+        var k = 0
+        while (!found && k < starts.size) {
+            if (item >= starts[k] && item < stops[k]) found = true
+            k += 1
+        }
+        found
+    }
+
+    fun first(): int = if (starts.size == 0) tokenInvalidType else starts[0]
+
+    fun count(): int {
+        var n = 0
+        for (k in 0 until starts.size) n += stops[k] - starts[k]
+        n
+    }
+
+    fun addOne(v: int): void {
+        addInterval(v, v + 1)
+    }
+
+    fun addRange(l: int, h: int): void {
+        addInterval(l, h + 1)
+    }
+
+    fun addInterval(start: int, stop: int): void {
+        var done = false
+        var pos = 0
+        while (!done && pos < starts.size) {
+            if (stop < starts[pos]) {
+                ivInsert(pos, start, stop)
+                done = true
+            } else if (stop == starts[pos]) {
+                starts[pos] = start
+                done = true
+            } else if (start <= stops[pos]) {
+                val a = if (starts[pos] < start) starts[pos] else start
+                val b = if (stops[pos] > stop) stops[pos] else stop
+                starts[pos] = a
+                stops[pos] = b
+                reduce(pos)
+                done = true
+            }
+            pos += 1
+        }
+        if (!done) {
+            starts.append(start)
+            stops.append(stop)
+        }
+    }
+
+    fun ivInsert(pos: int, start: int, stop: int): void {
+        starts.append(0)
+        stops.append(0)
+        var i = starts.size - 1
+        while (i > pos) {
+            starts[i] = starts[i - 1]
+            stops[i] = stops[i - 1]
+            i -= 1
+        }
+        starts[pos] = start
+        stops[pos] = stop
+    }
+
+    fun ivRemoveAt(pos: int): void {
+        for (i in pos until starts.size - 1) {
+            starts[i] = starts[i + 1]
+            stops[i] = stops[i + 1]
+        }
+        starts.truncate(starts.size - 1)
+        stops.truncate(stops.size - 1)
+    }
+
+    fun reduce(first: int): void {
+        var pos = first
+        var going = true
+        while (going) {
+            going = false
+            if (pos < starts.size - 1) {
+                if (stops[pos] >= stops[pos + 1]) {
+                    ivRemoveAt(pos + 1)
+                    going = true
+                } else if (stops[pos] >= starts[pos + 1]) {
+                    stops[pos] = stops[pos + 1]
+                    ivRemoveAt(pos + 1)
+                }
+            }
+        }
+    }
+
+    fun addSet(other: IntervalSet): void {
+        for (k in 0 until other.starts.size) addInterval(other.starts[k], other.stops[k])
+    }
+
+    fun removeRange(start: int, stop: int): void {
+        if (start == stop - 1) {
+            removeOne(start)
+            return
+        }
+        var pos = 0
+        var n = 0
+        var done = false
+        while (!done && n < starts.size) {
+            val es = starts[pos]
+            val ee = stops[pos]
+            if (stop <= es) {
+                done = true
+            } else if (start > es && stop < ee) {
+                starts[pos] = es
+                stops[pos] = start
+                ivInsert(pos, stop, ee)
+                done = true
+            } else if (start <= es && stop >= ee) {
+                ivRemoveAt(pos)
+                pos -= 1
+            } else if (start < ee) {
+                stops[pos] = start
+            } else if (stop < ee) {
+                starts[pos] = stop
+            }
+            if (!done) {
+                pos += 1
+                n += 1
+            }
+        }
+    }
+
+    fun removeOne(value: int): void {
+        var done = false
+        var i = 0
+        while (!done && i < starts.size) {
+            val es = starts[i]
+            val ee = stops[i]
+            if (value < es) {
+                done = true
+            } else if (value == es && value == ee - 1) {
+                ivRemoveAt(i)
+                done = true
+            } else if (value == es) {
+                starts[i] = es + 1
+                done = true
+            } else if (value == ee - 1) {
+                stops[i] = ee - 1
+                done = true
+            } else if (value < ee - 1) {
+                starts[i] = value + 1
+                ivInsert(i, es, value)
+                done = true
+            }
+            i += 1
+        }
+    }
+
+    fun copy(): IntervalSet {
+        val result = intervalSet()
+        result.addSet(this)
+        result
+    }
+
+    fun complement(start: int, stop: int): IntervalSet {
+        val result = intervalSet()
+        result.addInterval(start, stop + 1)
+        for (k in 0 until starts.size) result.removeRange(starts[k], stops[k])
+        result
+    }
+
+    fun intersects(other: IntervalSet): bool {
+        var hit = false
+        for (k in 0 until starts.size) {
+            var v = starts[k]
+            while (!hit && v < stops[k]) {
+                if (other.contains(v)) hit = true
+                v += 1
+            }
+        }
+        hit
+    }
+
+    fun elements(): array<int> {
+        val result: array<int> = []
+        for (k in 0 until starts.size) {
+            var v = starts[k]
+            while (v < stops[k]) {
+                result.append(v)
+                v += 1
+            }
+        }
+        result
+    }
+}
+
+fun intervalSet(): IntervalSet = IntervalSet([], [])
+
+fun intervalSetOf(v: int): IntervalSet {
+    val s = intervalSet()
+    s.addOne(v)
+    s
+}
+
+val missingNull = "\x00null"
+val missingUndefined = "\x00undefined"
+
+// literalNames[t] || symbolicNames[t] as JavaScript evaluates it; a missing
+// name is a marker that prints as "null"/"undefined" alone and "" in a list.
+fun vocabularyName(literalNames: array<string?>, symbolicNames: array<string?>, t: int): string {
+    var name = missingUndefined
+    if (t == tokenEof) name = "<EOF>"
+    else if (t == tokenEpsilon) name = "<EPSILON>"
+    else {
+        val lit = if (t >= 0 && t < literalNames.size) literalNames[t] else null
+        val sym = if (t >= 0 && t < symbolicNames.size) symbolicNames[t] else null
+        if (lit != null && lit.size > 0) name = lit
+        else if (sym != null) name = sym
+        else if (t >= 0 && t < symbolicNames.size) name = missingNull
+    }
+    name
+}
+
+fun missingNameText(name: string): string =
+    if (name == missingNull) "null" else if (name == missingUndefined) "undefined" else name
+
+fun IntervalSet.toTokenString(literalNames: array<string?>, symbolicNames: array<string?>): string {
+    var text = "{}"
+    if (starts.size > 0) {
+        val names: array<string> = []
+        for (k in 0 until starts.size) {
+            var j = starts[k]
+            while (j < stops[k]) {
+                names.append(vocabularyName(literalNames, symbolicNames, j))
+                j += 1
+            }
+        }
+        if (names.size > 1) {
+            var joined = ""
+            for (i in 0 until names.size) {
+                if (i > 0) joined = joined + ", "
+                val n = names[i]
+                if (n != missingNull && n != missingUndefined) joined = joined + n
+            }
+            text = "{$joined}"
+        } else text = missingNameText(names[0])
+    }
+    text
+}

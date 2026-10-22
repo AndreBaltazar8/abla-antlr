@@ -1,0 +1,459 @@
+// The ATN, deserialized from the version 3 format that ANTLR 4.9 writes into
+// .interp files.
+
+import "abla/text"
+import "intervalset.ab"
+
+val atnLexer = 0
+val atnParser = 1
+
+val stInvalid = 0
+val stBasic = 1
+val stRuleStart = 2
+val stBlockStart = 3
+val stPlusBlockStart = 4
+val stStarBlockStart = 5
+val stTokenStart = 6
+val stRuleStop = 7
+val stBlockEnd = 8
+val stStarLoopBack = 9
+val stStarLoopEntry = 10
+val stPlusLoopBack = 11
+val stLoopEnd = 12
+
+val trEpsilon = 1
+val trRange = 2
+val trRule = 3
+val trPredicate = 4
+val trAtom = 5
+val trAction = 6
+val trSet = 7
+val trNotSet = 8
+val trWildcard = 9
+val trPrecedence = 10
+
+val laChannel = 0
+val laCustom = 1
+val laMode = 2
+val laMore = 3
+val laPopMode = 4
+val laPushMode = 5
+val laSkip = 6
+val laType = 7
+
+val emptyReturnState = 2147483647
+val lexerMaxChar = 1114111
+
+class Atn(
+    val grammarType: int,
+    val maxTokenType: int,
+    val stateType: array<int>,
+    val stateRule: array<int>,
+    val stateTrans: array<array<int>>,
+    val epsilonOnly: array<bool>,
+    val decision: array<int>,
+    val nonGreedy: array<bool>,
+    val endState: array<int>,
+    val startState: array<int>,
+    val loopBackState: array<int>,
+    val stopState: array<int>,
+    val precedenceRule: array<bool>,
+    val precedenceDecision: array<bool>,
+    val transType: array<int>,
+    val transTarget: array<int>,
+    val transA: array<int>,
+    val transB: array<int>,
+    val transFollow: array<int>,
+    val transFlag: array<bool>,
+    val transReturn: array<int>,
+    val transLabel: array<IntervalSet?>,
+    val ruleToStart: array<int>,
+    val ruleToStop: array<int>,
+    val ruleToTokenType: array<int>,
+    val modeToStart: array<int>,
+    val decisionToState: array<int>,
+    val lexerActionType: array<int>,
+    val lexerActionA: array<int>,
+    val lexerActionB: array<int>
+) {
+    fun stateCount(): int = stateType.size
+
+    fun transitionCount(s: int): int = stateTrans[s].size
+
+    fun transition(s: int, i: int): int = stateTrans[s][i]
+
+    fun isEpsilonTransition(t: int): bool {
+        val k = transType[t]
+        k == trEpsilon || k == trRule || k == trPredicate || k == trAction || k == trPrecedence
+    }
+
+    // Transition.matches(symbol, minVocabSymbol, maxVocabSymbol)
+    fun matches(t: int, symbol: int, minVocab: int, maxVocab: int): bool {
+        val k = transType[t]
+        var result = false
+        if (k == trAtom) result = transA[t] == symbol
+        else if (k == trRange) result = symbol >= transA[t] && symbol <= transB[t]
+        else if (k == trSet) {
+            val label = transLabel[t]
+            if (label != null) result = label.contains(symbol)
+        } else if (k == trNotSet) {
+            val label = transLabel[t]
+            if (label != null) result = symbol >= minVocab && symbol <= maxVocab && !label.contains(symbol)
+        } else if (k == trWildcard) result = symbol >= minVocab && symbol <= maxVocab
+        result
+    }
+}
+
+class AtnBuilder(
+    var stateType: array<int>,
+    var stateRule: array<int>,
+    var stateTrans: array<array<int>>,
+    var epsilonOnly: array<bool>,
+    var decision: array<int>,
+    var nonGreedy: array<bool>,
+    var endState: array<int>,
+    var startState: array<int>,
+    var loopBackState: array<int>,
+    var stopState: array<int>,
+    var precedenceRule: array<bool>,
+    var precedenceDecision: array<bool>,
+    var transType: array<int>,
+    var transTarget: array<int>,
+    var transA: array<int>,
+    var transB: array<int>,
+    var transFollow: array<int>,
+    var transFlag: array<bool>,
+    var transReturn: array<int>,
+    var transLabel: array<IntervalSet?>
+) {
+    fun addState(kind: int, rule: int): void {
+        stateType.append(kind)
+        stateRule.append(rule)
+        stateTrans.append([])
+        epsilonOnly.append(false)
+        decision.append(-1)
+        nonGreedy.append(false)
+        endState.append(-1)
+        startState.append(-1)
+        loopBackState.append(-1)
+        stopState.append(-1)
+        precedenceRule.append(false)
+        precedenceDecision.append(false)
+    }
+
+    fun addTransition(src: int, kind: int, target: int, a: int, b: int, follow: int, flag: bool, ret: int, label: IntervalSet?): void {
+        val t = transType.size
+        transType.append(kind)
+        transTarget.append(target)
+        transA.append(a)
+        transB.append(b)
+        transFollow.append(follow)
+        transFlag.append(flag)
+        transReturn.append(ret)
+        transLabel.append(label)
+        val eps = kind == trEpsilon || kind == trRule || kind == trPredicate || kind == trAction || kind == trPrecedence
+        if (stateTrans[src].size == 0) epsilonOnly[src] = eps
+        else if (epsilonOnly[src] != eps) epsilonOnly[src] = false
+        stateTrans[src].append(t)
+    }
+}
+
+class AtnReader(val data: array<int>, var pos: int) {
+    fun next(): int {
+        val v = data[pos]
+        pos += 1
+        v
+    }
+
+    fun next32(): int {
+        val low = next()
+        val high = next()
+        low | (high << 16)
+    }
+}
+
+fun hexByte(b: int): string {
+    val digits = "0123456789ABCDEF"
+    digits.slice(b >> 4, (b >> 4) + 1) + digits.slice(b & 15, (b & 15) + 1)
+}
+
+fun readUuid(var r: AtnReader): string {
+    val bb = filledArray(16, 0)
+    var i = 7
+    while (i >= 0) {
+        val v = r.next()
+        bb[2 * i + 1] = v & 255
+        bb[2 * i] = (v >> 8) & 255
+        i -= 1
+    }
+    var s = ""
+    for (k in 0 until 16) {
+        if (k == 4 || k == 6 || k == 8 || k == 10) s = s + "-"
+        s = s + hexByte(bb[k])
+    }
+    s
+}
+
+val baseSerializedUuid = "AADB8D7E-AEEF-4415-AD2B-8204D6CF042E"
+val addedUnicodeSmp = "59627784-3BE5-417A-B9EB-8131A7286089"
+
+class AtnLoad(val atn: Atn?, val error: string)
+
+fun isBlockStartType(kind: int): bool = kind == stBlockStart || kind == stPlusBlockStart || kind == stStarBlockStart
+
+fun readSets(var r: AtnReader, var sets: array<IntervalSet>, wide: bool): void {
+    val m = r.next()
+    for (i in 0 until m) {
+        val iset = intervalSet()
+        val n = r.next()
+        val containsEof = r.next()
+        if (containsEof != 0) iset.addOne(-1)
+        for (j in 0 until n) {
+            val a = if (wide) r.next32() else r.next()
+            val b = if (wide) r.next32() else r.next()
+            iset.addRange(a, b)
+        }
+        sets.append(iset)
+    }
+}
+
+// raw holds the serialized values (the integers between the brackets of an
+// .interp file's atn section, or the char codes of a generated parser's string).
+fun deserializeAtn(raw: array<int>): AtnLoad {
+    val data: array<int> = []
+    for (i in 0 until raw.size) {
+        val v = raw[i]
+        data.append(if (i == 0) v else if (v > 1) v - 2 else v + 65534)
+    }
+    val r = AtnReader(data, 0)
+    val version = r.next()
+    if (version != 3) return AtnLoad(null, "Could not deserialize ATN with version $version (expected 3).")
+    val uuid = readUuid(r)
+    if (uuid != baseSerializedUuid && uuid != addedUnicodeSmp) return AtnLoad(null, "Could not deserialize ATN with UUID: $uuid")
+    val grammarType = r.next()
+    val maxTokenType = r.next()
+    val b = AtnBuilder([], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [])
+    val loopBackNumbers: array<int> = []
+    val endNumbers: array<int> = []
+    val nstates = r.next()
+    for (i in 0 until nstates) {
+        val stype = r.next()
+        if (stype == stInvalid) {
+            b.addState(stInvalid, -1)
+        } else {
+            var ruleIndex = r.next()
+            if (ruleIndex == 65535) ruleIndex = -1
+            b.addState(stype, ruleIndex)
+            if (stype == stLoopEnd) {
+                loopBackNumbers.append(i)
+                loopBackNumbers.append(r.next())
+            } else if (isBlockStartType(stype)) {
+                endNumbers.append(i)
+                endNumbers.append(r.next())
+            }
+        }
+    }
+    var k = 0
+    while (k < loopBackNumbers.size) {
+        b.loopBackState[loopBackNumbers[k]] = loopBackNumbers[k + 1]
+        k += 2
+    }
+    k = 0
+    while (k < endNumbers.size) {
+        b.endState[endNumbers[k]] = endNumbers[k + 1]
+        k += 2
+    }
+    val numNonGreedy = r.next()
+    for (j in 0 until numNonGreedy) b.nonGreedy[r.next()] = true
+    val numPrecedence = r.next()
+    for (j in 0 until numPrecedence) b.precedenceRule[r.next()] = true
+
+    val nrules = r.next()
+    val ruleToStart: array<int> = []
+    val ruleToTokenType: array<int> = []
+    for (i in 0 until nrules) {
+        ruleToStart.append(r.next())
+        if (grammarType == atnLexer) {
+            var tokenType = r.next()
+            if (tokenType == 65535) tokenType = -1
+            ruleToTokenType.append(tokenType)
+        }
+    }
+    val ruleToStop = filledArray(nrules, -1)
+    for (s in 0 until b.stateType.size) {
+        if (b.stateType[s] == stRuleStop) {
+            ruleToStop[b.stateRule[s]] = s
+            b.stopState[ruleToStart[b.stateRule[s]]] = s
+        }
+    }
+    val modeToStart: array<int> = []
+    val nmodes = r.next()
+    for (i in 0 until nmodes) modeToStart.append(r.next())
+
+    val sets: array<IntervalSet> = []
+    readSets(r, sets, false)
+    if (uuid == addedUnicodeSmp) readSets(r, sets, true)
+
+    val nedges = r.next()
+    for (i in 0 until nedges) {
+        val src = r.next()
+        val trg = r.next()
+        val ttype = r.next()
+        val arg1 = r.next()
+        val arg2 = r.next()
+        val arg3 = r.next()
+        if (ttype == trEpsilon) b.addTransition(src, trEpsilon, trg, 0, 0, -1, false, -1, null)
+        else if (ttype == trRange) {
+            val lo = if (arg3 != 0) -1 else arg1
+            val label = intervalSet()
+            label.addRange(lo, arg2)
+            b.addTransition(src, trRange, trg, lo, arg2, -1, false, -1, label)
+        } else if (ttype == trRule) {
+            // RuleTransition(ruleStart = states[arg1], ruleIndex = arg2, precedence = arg3, followState = target)
+            b.addTransition(src, trRule, arg1, arg2, arg3, trg, false, -1, null)
+        } else if (ttype == trPredicate) b.addTransition(src, trPredicate, trg, arg1, arg2, -1, arg3 != 0, -1, null)
+        else if (ttype == trPrecedence) b.addTransition(src, trPrecedence, trg, arg1, 0, -1, false, -1, null)
+        else if (ttype == trAtom) {
+            val atom = if (arg3 != 0) -1 else arg1
+            b.addTransition(src, trAtom, trg, atom, 0, -1, false, -1, intervalSetOf(atom))
+        } else if (ttype == trAction) b.addTransition(src, trAction, trg, arg1, arg2, -1, arg3 != 0, -1, null)
+        else if (ttype == trSet) b.addTransition(src, trSet, trg, arg1, 0, -1, false, -1, sets[arg1])
+        else if (ttype == trNotSet) b.addTransition(src, trNotSet, trg, arg1, 0, -1, false, -1, sets[arg1])
+        else if (ttype == trWildcard) b.addTransition(src, trWildcard, trg, 0, 0, -1, false, -1, null)
+        else return AtnLoad(null, "The specified transition type: $ttype is not valid.")
+    }
+    // rule stop states return to every follow state
+    val nstatesNow = b.stateType.size
+    for (s in 0 until nstatesNow) {
+        val count = b.stateTrans[s].size
+        for (j in 0 until count) {
+            val t = b.stateTrans[s][j]
+            if (b.transType[t] == trRule) {
+                val targetRule = b.stateRule[b.transTarget[t]]
+                var outermost = -1
+                if (b.precedenceRule[ruleToStart[targetRule]] && b.transB[t] == 0) outermost = targetRule
+                b.addTransition(ruleToStop[targetRule], trEpsilon, b.transFollow[t], 0, 0, -1, false, outermost, null)
+            }
+        }
+    }
+    for (s in 0 until nstatesNow) {
+        val kind = b.stateType[s]
+        if (isBlockStartType(kind)) {
+            val end = b.endState[s]
+            if (end < 0 || b.startState[end] >= 0) return AtnLoad(null, "IllegalState")
+            b.startState[end] = s
+        }
+        if (kind == stPlusLoopBack) {
+            for (t in b.stateTrans[s]) {
+                val target = b.transTarget[t]
+                if (b.stateType[target] == stPlusBlockStart) b.loopBackState[target] = s
+            }
+        } else if (kind == stStarLoopBack) {
+            for (t in b.stateTrans[s]) {
+                val target = b.transTarget[t]
+                if (b.stateType[target] == stStarLoopEntry) b.loopBackState[target] = s
+            }
+        }
+    }
+    val decisionToState: array<int> = []
+    val ndecisions = r.next()
+    for (i in 0 until ndecisions) {
+        val s = r.next()
+        decisionToState.append(s)
+        b.decision[s] = i
+    }
+    val lexerActionType: array<int> = []
+    val lexerActionA: array<int> = []
+    val lexerActionB: array<int> = []
+    if (grammarType == atnLexer) {
+        val count = r.next()
+        for (i in 0 until count) {
+            lexerActionType.append(r.next())
+            var d1 = r.next()
+            if (d1 == 65535) d1 = -1
+            var d2 = r.next()
+            if (d2 == 65535) d2 = -1
+            lexerActionA.append(d1)
+            lexerActionB.append(d2)
+        }
+    }
+    // markPrecedenceDecisions
+    for (s in 0 until b.stateType.size) {
+        if (b.stateType[s] == stStarLoopEntry && b.precedenceRule[ruleToStart[b.stateRule[s]]]) {
+            val trans = b.stateTrans[s]
+            val maybeLoopEnd = b.transTarget[trans[trans.size - 1]]
+            if (b.stateType[maybeLoopEnd] == stLoopEnd && b.epsilonOnly[maybeLoopEnd]) {
+                val first = b.stateTrans[maybeLoopEnd][0]
+                if (b.stateType[b.transTarget[first]] == stRuleStop) b.precedenceDecision[s] = true
+            }
+        }
+    }
+    val atn = Atn(
+        grammarType, maxTokenType,
+        b.stateType, b.stateRule, b.stateTrans, b.epsilonOnly, b.decision, b.nonGreedy,
+        b.endState, b.startState, b.loopBackState, b.stopState, b.precedenceRule, b.precedenceDecision,
+        b.transType, b.transTarget, b.transA, b.transB, b.transFollow, b.transFlag, b.transReturn, b.transLabel,
+        ruleToStart, ruleToStop, ruleToTokenType, modeToStart, decisionToState,
+        lexerActionType, lexerActionA, lexerActionB
+    )
+    AtnLoad(atn, "")
+}
+
+// The sections of an .interp file.
+class InterpFile(
+    val literalNames: array<string?>,
+    val symbolicNames: array<string?>,
+    val ruleNames: array<string>,
+    val channelNames: array<string>,
+    val modeNames: array<string>,
+    val atnValues: array<int>
+)
+
+fun trimTrailingNulls(var names: array<string?>): void {
+    var n = names.size
+    while (n > 0 && names[n - 1] == null) n -= 1
+    names.truncate(n)
+}
+
+fun parseInterp(text: string): InterpFile {
+    val literalNames: array<string?> = []
+    val symbolicNames: array<string?> = []
+    val ruleNames: array<string> = []
+    val channelNames: array<string> = []
+    val modeNames: array<string> = []
+    val atnValues: array<int> = []
+    var section = ""
+    for (rawLine in text.split("\n")) {
+        val line = if (rawLine.endsWith("\r")) rawLine.slice(0, rawLine.size - 1) else rawLine
+        if (line == "token literal names:") section = "literal"
+        else if (line == "token symbolic names:") section = "symbolic"
+        else if (line == "rule names:") section = "rule"
+        else if (line == "channel names:") section = "channel"
+        else if (line == "mode names:") section = "mode"
+        else if (line == "atn:") section = "atn"
+        else if (line.size == 0) section = ""
+        else if (section == "literal") literalNames.append(if (line == "null") null else line)
+        else if (section == "symbolic") symbolicNames.append(if (line == "null") null else line)
+        else if (section == "rule") ruleNames.append(line)
+        else if (section == "channel") channelNames.append(line)
+        else if (section == "mode") modeNames.append(line)
+        else if (section == "atn") {
+            var v = 0
+            var inNumber = false
+            for (c in line) {
+                if (c >= 48 && c <= 57) {
+                    v = v * 10 + (c - 48)
+                    inNumber = true
+                } else if (inNumber) {
+                    atnValues.append(v)
+                    v = 0
+                    inNumber = false
+                }
+            }
+            if (inNumber) atnValues.append(v)
+        }
+    }
+    trimTrailingNulls(literalNames)
+    trimTrailingNulls(symbolicNames)
+    InterpFile(literalNames, symbolicNames, ruleNames, channelNames, modeNames, atnValues)
+}

@@ -1,0 +1,21 @@
+import "abla/io"
+import "abla/fs"
+import "abla/process"
+import "../src/atn.ab"
+
+fun main: int {
+    val interp = parseInterp(path(processArgument(0)).readText())
+    val load = deserializeAtn(interp.atnValues)
+    val atn = load.atn
+    if (atn == null) {
+        println(load.error)
+        return 1
+    }
+    println("type ${atn.grammarType} max ${atn.maxTokenType} states ${atn.stateCount()} decisions ${atn.decisionToState.size}")
+    for (s in 0 until atn.stateCount()) {
+        var line = "$s ${atn.stateType[s]} ${atn.stateRule[s]} d${atn.decision[s]} e${if (atn.epsilonOnly[s]) 1 else 0} end${atn.endState[s]} lb${atn.loopBackState[s]} pd${if (atn.precedenceDecision[s]) 1 else 0}:"
+        for (t in atn.stateTrans[s]) line = line + " [${atn.transType[t]} ${atn.transTarget[t]} ${atn.transA[t]} ${atn.transB[t]} ${atn.transFollow[t]} ${atn.transReturn[t]}]"
+        println(line)
+    }
+    0
+}

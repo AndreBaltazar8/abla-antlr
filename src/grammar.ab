@@ -7,6 +7,8 @@
 import "atn.ab"
 import "context.ab"
 import "intervalset.ab"
+import "abla/text"
+import "g4chars.ab"
 import "ll1.ab"
 
 val opMatch = 1
@@ -313,6 +315,28 @@ fun copyStrings(xs: array<string>): array<string> {
     result
 }
 
+// A literal name as generated code holds it: the tool turns '\n' into the
+// target string literal "'\n'", so the name has the escapes decoded.
+fun generatedLiteralName(name: string): string {
+    if (name.size < 2 || name[0] != 39 || name.indexOf("\\") < 0) return name
+    val decoded = stringFromLiteral(name)
+    if (!decoded.ok) return name
+    var s = "'"
+    var i = 0
+    while (i < decoded.units.size) {
+        val cp = codePointAtUnits(decoded.units, i)
+        s = s + utf8Encode(cp)
+        i += charCount(cp)
+    }
+    s + "'"
+}
+
+fun generatedLiteralNames(xs: array<string?>): array<string?> {
+    val result: array<string?> = []
+    for (x in xs) result.append(if (x == null) null else generatedLiteralName(x))
+    result
+}
+
 fun compileParserGrammar(text: string): ParserGrammar {
     val interp = parseInterp(text)
     val atn = deserializeAtn(interp.atnValues)
@@ -369,6 +393,6 @@ fun compileParserGrammar(text: string): ParserGrammar {
             rulePrimaryAlt.append(0)
         }
     }
-    ParserGrammar(atn, copyStrings(interp.ruleNames), copyNames(interp.literalNames), copyNames(interp.symbolicNames), nextTokens, looks, ll1,
+    ParserGrammar(atn, copyStrings(interp.ruleNames), generatedLiteralNames(interp.literalNames), copyNames(interp.symbolicNames), nextTokens, looks, ll1,
         prog, ruleBody, ruleLr, ruleSingleAlt, rulePrimaryAlt, "")
 }

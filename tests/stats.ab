@@ -1,0 +1,18 @@
+import "abla/io"
+import "abla/fs"
+import "abla/process"
+import "../src/antlr.ab"
+
+fun main: int {
+    val antlr = antlrLoad(path(processArgument(0)).readText(), path(processArgument(1)).readText())
+    val rule = processArgument(2)
+    var i = 3
+    while (i < processArgumentCount()) {
+        val result = antlr.parse(path(processArgument(i)).readText(), rule)
+        var dfaStates = 0
+        for (d in antlr.engine.dfas) dfaStates += d.states.size
+        println("${result.tokens.size} tokens: configs ${antlr.engine.configs.state.size} contexts ${antlr.engine.contexts.kind.size} sems ${antlr.engine.sems.kind.size} dfa ${dfaStates} lexconfigs ${antlr.lexer.configs.state.size} lexctx ${antlr.lexer.contexts.kind.size}")
+        i += 1
+    }
+    0
+}

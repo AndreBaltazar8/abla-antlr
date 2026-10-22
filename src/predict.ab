@@ -662,6 +662,8 @@ fun Engine.execAtn(g: ParserGrammar, d: int, s0: int, startIndex: int, outer: in
 
 // Returns the predicted alternative, or 0 with exc set.
 fun Engine.adaptivePredict(g: ParserGrammar, d: int, outer: int): int {
+    val mark = configs.mark()
+    val statesBefore = dfas[d].states.size
     val startIndex = index
     predictStart = startIndex
     predictOuter = outer
@@ -676,7 +678,6 @@ fun Engine.adaptivePredict(g: ParserGrammar, d: int, outer: int): int {
         val closure = computeStartState(g, dfas[d].atnStartState, -1, false)
         if (precedenceDfa) {
             val filtered = applyPrecedenceFilter(closure)
-            dfas[d].s0Configs = closure
             s0 = addDfaState(d, dfaState(filtered))
             val p = precedence()
             if (p >= 0) {
@@ -692,5 +693,6 @@ fun Engine.adaptivePredict(g: ParserGrammar, d: int, outer: int): int {
     predictDfa = -1
     contexts.endMergeCache()
     seek(startIndex)
+    compactConfigs(configs, dfas[d], mark, statesBefore)
     alt
 }

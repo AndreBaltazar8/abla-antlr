@@ -49,7 +49,10 @@ fun copyInts(xs: array<int>): array<int> {
 class LexError(val line: int, val column: int, val message: string)
 
 // Source text as UTF-16 code units, with the byte offset of each unit so token
-// text can be cut from the UTF-8 original.
+// text can be cut from the UTF-8 original. Invalid UTF-8 decodes as a
+// JavaScript TextDecoder does (U+FFFD per maximal invalid subpart), and text
+// that splits a surrogate pair gets U+FFFD for the lone half, as JavaScript
+// writes it out.
 class SourceText(val text: string, val units: array<int>, val unitByte: array<int>) {
     fun size(): int = units.size
 
@@ -57,52 +60,130 @@ class SourceText(val text: string, val units: array<int>, val unitByte: array<in
         var e = stop
         if (e >= units.size) e = units.size - 1
         var result = ""
-        if (start < units.size && start <= e) result = text.slice(unitByte[start], unitByte[e + 1])
+        if (start < units.size && start <= e) {
+            var s = start
+            var prefix = ""
+            var suffix = ""
+            if (units[s] >= 56320 && units[s] <= 57343 && s > 0 && unitByte[s] == unitByte[s - 1]) {
+                prefix = "\u{FFFD}"
+                s += 1
+            }
+            if (s <= e && units[e] >= 55296 && units[e] <= 56319 && e + 1 < units.size && unitByte[e + 1] == unitByte[e]) {
+                suffix = "\u{FFFD}"
+                e -= 1
+            }
+            val middle = if (s <= e) text.slice(unitByte[s], unitByte[e + 1]) else ""
+            result = prefix + middle + suffix
+        }
         result
     }
 }
 
-fun sourceText(text: string): SourceText {
-    val units: array<int> = []
-    val unitByte: array<int> = []
+class Decoded(var points: array<int>, var offsets: array<int>, var lengths: array<int>, var invalid: bool)
+
+fun decodeUtf8(text: string): Decoded {
+    val d = Decoded([], [], [], false)
     var i = 0
     val n = text.size
+    var cp = 0
+    var needed = 0
+    var seen = 0
+    var lower = 128
+    var upper = 191
+    var begin = 0
     while (i < n) {
-        val b0 = text[i]
-        var cp = 65533
-        var len = 1
-        if (b0 < 128) {
-            cp = b0
-        } else if (b0 >= 194 && b0 <= 223 && i + 1 < n && (text[i + 1] & 192) == 128) {
-            cp = ((b0 & 31) << 6) | (text[i + 1] & 63)
-            len = 2
-        } else if (b0 >= 224 && b0 <= 239 && i + 2 < n && (text[i + 1] & 192) == 128 && (text[i + 2] & 192) == 128) {
-            val v = ((b0 & 15) << 12) | ((text[i + 1] & 63) << 6) | (text[i + 2] & 63)
-            if (v >= 2048 && !(v >= 55296 && v <= 57343)) {
-                cp = v
-                len = 3
+        val b = text[i]
+        if (needed == 0) {
+            begin = i
+            if (b < 128) {
+                d.points.append(b)
+                d.offsets.append(i)
+                d.lengths.append(1)
+            } else if (b >= 194 && b <= 223) {
+                needed = 1
+                cp = b & 31
+            } else if (b >= 224 && b <= 239) {
+                if (b == 224) lower = 160
+                if (b == 237) upper = 159
+                needed = 2
+                cp = b & 15
+            } else if (b >= 240 && b <= 244) {
+                if (b == 240) lower = 144
+                if (b == 244) upper = 143
+                needed = 3
+                cp = b & 7
+            } else {
+                d.points.append(65533)
+                d.offsets.append(i)
+                d.lengths.append(1)
+                d.invalid = true
             }
-        } else if (b0 >= 240 && b0 <= 244 && i + 3 < n && (text[i + 1] & 192) == 128 && (text[i + 2] & 192) == 128 && (text[i + 3] & 192) == 128) {
-            val v = ((b0 & 7) << 18) | ((text[i + 1] & 63) << 12) | ((text[i + 2] & 63) << 6) | (text[i + 3] & 63)
-            if (v >= 65536 && v <= 1114111) {
-                cp = v
-                len = 4
+            i += 1
+        } else if (b < lower || b > upper) {
+            d.points.append(65533)
+            d.offsets.append(begin)
+            d.lengths.append(i - begin)
+            d.invalid = true
+            cp = 0
+            needed = 0
+            seen = 0
+            lower = 128
+            upper = 191
+        } else {
+            lower = 128
+            upper = 191
+            cp = (cp << 6) | (b & 63)
+            seen += 1
+            i += 1
+            if (seen == needed) {
+                d.points.append(cp)
+                d.offsets.append(begin)
+                d.lengths.append(i - begin)
+                cp = 0
+                needed = 0
+                seen = 0
             }
         }
+    }
+    if (needed != 0) {
+        d.points.append(65533)
+        d.offsets.append(begin)
+        d.lengths.append(n - begin)
+        d.invalid = true
+    }
+    d
+}
+
+fun sourceText(text: string): SourceText {
+    val d = decodeUtf8(text)
+    val units: array<int> = []
+    val unitByte: array<int> = []
+    var normalized = text
+    if (d.invalid) {
+        var rebuilt = ""
+        for (k in 0 until d.points.size) {
+            rebuilt = rebuilt + (if (d.points[k] == 65533) "\u{FFFD}" else text.slice(d.offsets[k], d.offsets[k] + d.lengths[k]))
+        }
+        normalized = rebuilt
+    }
+    var at = 0
+    for (k in 0 until d.points.size) {
+        val cp = d.points[k]
+        val len = if (d.invalid && cp == 65533) 3 else d.lengths[k]
         if (cp > 65535) {
             val v = cp - 65536
             units.append(55296 + (v >> 10))
-            unitByte.append(i)
+            unitByte.append(at)
             units.append(56320 + (v & 1023))
-            unitByte.append(i)
+            unitByte.append(at)
         } else {
             units.append(cp)
-            unitByte.append(i)
+            unitByte.append(at)
         }
-        i += len
+        at += len
     }
-    unitByte.append(n)
-    SourceText(text, units, unitByte)
+    unitByte.append(at)
+    SourceText(normalized, units, unitByte)
 }
 
 // Lexer action executors, hash-consed. Each entry is a canonical action id and
@@ -455,6 +536,9 @@ class Lexer(
     }
 
     fun matchToken(atn: Atn): int {
+        val matchMode = mode
+        val mark = configs.mark()
+        val statesBefore = dfas[matchMode].states.size
         startIndex = index
         prevIndex = -1
         prevLine = 0
@@ -469,6 +553,7 @@ class Lexer(
             if (!suppressEdge) dfas[mode].s0 = next
             result = execAtn(atn, next)
         } else result = execAtn(atn, dfas[mode].s0)
+        compactConfigs(configs, dfas[matchMode], mark, statesBefore)
         result
     }
 

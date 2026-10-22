@@ -57,6 +57,17 @@ class ConfigPool(
 
     fun mark(): int = state.size
 
+    fun moveTo(from: int, to: int): void {
+        state[to] = state[from]
+        alt[to] = alt[from]
+        ctx[to] = ctx[from]
+        sem[to] = sem[from]
+        reach[to] = reach[from]
+        suppressed[to] = suppressed[from]
+        executor[to] = executor[from]
+        nonGreedy[to] = nonGreedy[from]
+    }
+
     fun truncateTo(n: int): void {
         state.truncate(n)
         alt.truncate(n)
@@ -119,3 +130,66 @@ class Dfa(
 
 fun dfaFor(atnStartState: int, decision: int, precedenceDfa: bool): Dfa =
     Dfa(atnStartState, decision, [], Map(), dfaNone, precedenceDfa, [], null)
+
+fun sortInts(var xs: array<int>): void {
+    if (xs.size > 1) {
+        val tmp = filledArray(xs.size, 0)
+        var width = 1
+        while (width < xs.size) {
+            var lo = 0
+            while (lo < xs.size) {
+                val mid = if (lo + width < xs.size) lo + width else xs.size
+                val hi = if (lo + 2 * width < xs.size) lo + 2 * width else xs.size
+                var i = lo
+                var j = mid
+                var k = lo
+                while (k < hi) {
+                    if (i < mid && (j >= hi || xs[i] <= xs[j])) {
+                        tmp[k] = xs[i]
+                        i += 1
+                    } else {
+                        tmp[k] = xs[j]
+                        j += 1
+                    }
+                    k += 1
+                }
+                lo = hi
+            }
+            for (k in 0 until xs.size) xs[k] = tmp[k]
+            width *= 2
+        }
+    }
+}
+
+// Drops the configurations made since mark that no DFA state added since
+// statesBefore holds, renumbering the kept ones from mark.
+fun compactConfigs(var pool: ConfigPool, var dfa: Dfa, mark: int, statesBefore: int): void {
+    val kept: array<int> = []
+    val seen: Map<int, int> = Map()
+    for (si in statesBefore until dfa.states.size) {
+        dfa.states[si].configs.lookup.clear()
+        dfa.states[si].configs.lookupText.clear()
+        for (c in dfa.states[si].configs.items) {
+            if (c >= mark && !seen.has(c)) {
+                seen.set(c, 0)
+                kept.append(c)
+            }
+        }
+    }
+    sortInts(kept)
+    for (i in 0 until kept.size) {
+        pool.moveTo(kept[i], mark + i)
+        seen.set(kept[i], mark + i)
+    }
+    for (si in statesBefore until dfa.states.size) {
+        val n = dfa.states[si].configs.items.size
+        for (k in 0 until n) {
+            val c = dfa.states[si].configs.items[k]
+            if (c >= mark) {
+                val moved = seen.get(c)
+                if (moved != null) dfa.states[si].configs.items[k] = moved
+            }
+        }
+    }
+    pool.truncateTo(mark + kept.size)
+}

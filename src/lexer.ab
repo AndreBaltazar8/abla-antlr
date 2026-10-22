@@ -186,6 +186,30 @@ fun sourceText(text: string): SourceText {
     SourceText(normalized, units, unitByte)
 }
 
+// Source text as code points (antlr4 InputStream with decodeToUnicodeCodePoints).
+fun codePointText(text: string): SourceText {
+    val d = decodeUtf8(text)
+    val units: array<int> = []
+    val unitByte: array<int> = []
+    var normalized = text
+    if (d.invalid) {
+        var rebuilt = ""
+        for (k in 0 until d.points.size) {
+            rebuilt = rebuilt + (if (d.points[k] == 65533) "\u{FFFD}" else text.slice(d.offsets[k], d.offsets[k] + d.lengths[k]))
+        }
+        normalized = rebuilt
+    }
+    var at = 0
+    for (k in 0 until d.points.size) {
+        val cp = d.points[k]
+        units.append(cp)
+        unitByte.append(at)
+        at += if (d.invalid && cp == 65533) 3 else d.lengths[k]
+    }
+    unitByte.append(at)
+    SourceText(normalized, units, unitByte)
+}
+
 // Lexer action executors, hash-consed. Each entry is a canonical action id and
 // the offset of a LexerIndexedCustomAction (-1 for a plain action).
 class ExecutorPool(

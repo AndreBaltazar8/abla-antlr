@@ -13,7 +13,7 @@ import "ll1.ab"
 
 fun escapeWsAndQuote(s: string): string = "'" + s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "'"
 
-fun Engine.tokenErrorDisplay(t: int): string = escapeWsAndQuote(tokens.text[t])
+fun Engine.tokenErrorDisplay(t: int): string = escapeWsAndQuote(tokText(t))
 
 fun Engine.endErrorCondition(): void {
     recovering = false
@@ -57,7 +57,7 @@ fun Engine.errorRecoverySet(g: ParserGrammar): IntervalSet {
 
 fun Engine.parserConsume(): int {
     val o = lt(1)
-    if (tokens.type[o] != tokenEof) streamConsume()
+    if (tokType(o) != tokenEof) streamConsume()
     addTokenNode(o, recovering)
     o
 }
@@ -126,8 +126,8 @@ fun Engine.missingSymbol(g: ParserGrammar): int {
     val expected = expectedTokens(g).first()
     val text = if (expected == tokenEof) "<missing EOF>" else "<missing ${literalNameText(g, expected)}>"
     val lookback = lt(-1)
-    if (tokens.type[current] == tokenEof && lookback >= 0) current = lookback
-    tokens.add(expected, defaultChannel, -1, -1, tokens.line[current], tokens.column[current], text, -1)
+    if (tokType(current) == tokenEof && lookback >= 0) current = lookback
+    conjure(expected, tokLine(current), tokColumn(current), text)
 }
 
 // Returns the matched or conjured token, or -1 with exc set.
@@ -145,13 +145,13 @@ fun Engine.recoverInline(g: ParserGrammar): int {
 fun Engine.match(g: ParserGrammar, ttype: int): bool {
     var ok = true
     val t = lt(1)
-    if (tokens.type[t] == ttype) {
+    if (tokType(t) == ttype) {
         endErrorCondition()
         parserConsume()
     } else {
         val r = recoverInline(g)
         if (r < 0) ok = false
-        else if (tokens.tokenIndex[r] == -1) addTokenNode(r, true)
+        else if (tokIndex(r) == -1) addTokenNode(r, true)
     }
     ok
 }
@@ -178,6 +178,7 @@ fun Engine.sync(g: ParserGrammar): bool {
 
 fun Engine.tokenRangeText(start: int, stop: int): string {
     var s = ""
+    fill()
     if (start >= 0 && stop >= 0) {
         var e = stop
         if (e >= streamCount) e = streamCount - 1
@@ -198,7 +199,7 @@ fun Engine.reportError(g: ParserGrammar): void {
     if (recovering) return
     recovering = true
     if (exc == excNoViableAlt) {
-        val input = if (tokens.type[excStart] == tokenEof) "<EOF>" else tokenRangeText(tokens.tokenIndex[excStart], tokens.tokenIndex[excOffending])
+        val input = if (tokType(excStart) == tokenEof) "<EOF>" else tokenRangeText(tokIndex(excStart), tokIndex(excOffending))
         notify("no viable alternative at input ${escapeWsAndQuote(input)}", excOffending)
     } else if (exc == excInputMismatch) {
         val expecting = expectedTokensAt(g, excState, excCtx)

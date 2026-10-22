@@ -1,0 +1,51 @@
+import "abla/io"
+import "../src/intervalset.ab"
+import "../src/context.ab"
+import "../src/lexer.ab"
+
+fun check(ok: bool, name: string, var failures: array<string>): void {
+    if (!ok) failures.append(name)
+}
+
+fun main: int {
+    val failures: array<string> = []
+
+    val s = intervalSet()
+    s.addOne(5)
+    s.addOne(3)
+    s.addRange(7, 9)
+    s.addOne(4)
+    s.addOne(6)
+    check(s.starts.size == 1 && s.starts[0] == 3 && s.stops[0] == 10, "intervals merge", failures)
+    val c = s.complement(1, 12)
+    check(c.contains(2) && !c.contains(5) && c.contains(11), "complement", failures)
+    s.removeOne(5)
+    check(!s.contains(5) && s.contains(4) && s.contains(6), "removeOne splits", failures)
+    val names: array<string?> = [null, "'a'", null]
+    val symbols: array<string?> = [null, "A", "B"]
+    val set = intervalSet()
+    set.addOne(1)
+    set.addOne(2)
+    set.addOne(-1)
+    check(set.toTokenString(names, symbols) == "{<EOF>, 'a', B}", "token set text", failures)
+
+    val pool = contextPool()
+    val a = pool.singleton(ctxEmpty, 10)
+    val b = pool.singleton(ctxEmpty, 20)
+    check(pool.singleton(ctxEmpty, 10) == a, "contexts are hash-consed", failures)
+    val m = pool.merge(a, b, false)
+    check(pool.length(m) == 2 && pool.getReturnState(m, 0) == 10 && pool.getReturnState(m, 1) == 20, "merge sorts payloads", failures)
+    check(pool.merge(a, ctxEmpty, true) == ctxEmpty, "wildcard root absorbs", failures)
+    val withEmpty = pool.merge(a, ctxEmpty, false)
+    check(pool.length(withEmpty) == 2 && pool.hasEmptyPath(withEmpty), "full-context root keeps $", failures)
+
+    val text = sourceText("a\u{1F600}b")
+    check(text.units.size == 4 && text.units[1] == 55357 && text.units[2] == 56832, "surrogate pairs", failures)
+    check(text.getText(1, 2) == "\u{1F600}" && text.getText(1, 1) == "\u{FFFD}", "split pairs print U+FFFD", failures)
+    val bad = sourceText("x\xE2\x82y\xFFz")
+    check(bad.units.size == 5 && bad.units[1] == 65533 && bad.units[3] == 65533 && bad.getText(0, 4) == "x\u{FFFD}y\u{FFFD}z", "invalid UTF-8", failures)
+
+    for (f in failures) println("FAIL $f")
+    println(if (failures.size == 0) "unit tests passed" else "${failures.size} unit tests failed")
+    failures.size
+}

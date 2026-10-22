@@ -1,0 +1,24 @@
+import "abla/io"
+import "abla/fs"
+import "abla/process"
+import "../src/antlr.ab"
+
+fun walk(node: AntlrNode, names: array<string>, var out: BufferedTextWriter): void {
+    if (node.kind == nodeRule) {
+        out.writeLine("${names[node.ruleIndex]} ${node.alt}")
+        for (c in node.children) walk(c, names, out)
+    }
+}
+
+fun main: int {
+    val antlr = antlrLoad(path(processArgument(0)).readText(), path(processArgument(1)).readText())
+    val out = bufferedStandardOutput()
+    var i = 3
+    while (i < processArgumentCount()) {
+        val result = antlr.parse(path(processArgument(i)).readText(), processArgument(2))
+        walk(result.tree, antlr.ruleNames(), out)
+        i += 1
+    }
+    out.flush()
+    0
+}

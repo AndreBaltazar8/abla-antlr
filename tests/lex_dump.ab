@@ -1,0 +1,26 @@
+import "abla/io"
+import "abla/fs"
+import "abla/process"
+import "../src/atn.ab"
+import "../src/lexer.ab"
+
+fun esc(s: string): string = s.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+fun main: int {
+    val interp = parseInterp(path(processArgument(0)).readText())
+    val load = deserializeAtn(interp.atnValues)
+    val atn = load.atn
+    if (atn == null) return 1
+    val dfas: array<Dfa> = []
+    for (m in 0 until atn.modeToStart.size) dfas.append(dfaFor(atn.modeToStart[m], m, false))
+    val src = path(processArgument(1)).readText()
+    val lexer = Lexer(contextPool(), configPool(), executorPool(), dfas,
+        sourceText(src), 0, 1, 0, -1, 0, [], -1, 0, -1, -1, false, 0, 0, -1, -1, -1, false, tokens(), [])
+    lexer.tokenizeAll(atn)
+    val out = lexer.out
+    println("#tokens")
+    for (i in 0 until out.count()) println("${out.type[i]} ${out.channel[i]} ${out.line[i]}:${out.column[i]} ${out.start[i]} ${out.stop[i]} ${esc(out.text[i])}")
+    println("#lexer")
+    for (e in lexer.errors) println("${e.line}:${e.column} ${esc(e.message)}")
+    0
+}

@@ -74,7 +74,8 @@ class Atn(
     val decisionToState: array<int>,
     val lexerActionType: array<int>,
     val lexerActionA: array<int>,
-    val lexerActionB: array<int>
+    val lexerActionB: array<int>,
+    val lexerActionCanon: array<int>
 ) {
     fun stateCount(): int = stateType.size
 
@@ -388,13 +389,24 @@ fun deserializeAtn(raw: array<int>): AtnLoad {
             }
         }
     }
+    // equal lexer actions compare equal in the runtime, whichever index they have
+    val lexerActionCanon: array<int> = []
+    for (i in 0 until lexerActionType.size) {
+        var c = i
+        var j = i - 1
+        while (j >= 0) {
+            if (lexerActionType[j] == lexerActionType[i] && lexerActionA[j] == lexerActionA[i] && lexerActionB[j] == lexerActionB[i]) c = j
+            j -= 1
+        }
+        lexerActionCanon.append(c)
+    }
     val atn = Atn(
         grammarType, maxTokenType,
         b.stateType, b.stateRule, b.stateTrans, b.epsilonOnly, b.decision, b.nonGreedy,
         b.endState, b.startState, b.loopBackState, b.stopState, b.precedenceRule, b.precedenceDecision,
         b.transType, b.transTarget, b.transA, b.transB, b.transFollow, b.transFlag, b.transReturn, b.transLabel,
         ruleToStart, ruleToStop, ruleToTokenType, modeToStart, decisionToState,
-        lexerActionType, lexerActionA, lexerActionB
+        lexerActionType, lexerActionA, lexerActionB, lexerActionCanon
     )
     AtnLoad(atn, "")
 }

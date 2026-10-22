@@ -1,0 +1,88 @@
+// Semantic contexts (predicates and their AND/OR combinations), hash-consed.
+// Id 0 is SemanticContext.NONE; -1 stands for null.
+
+val semNone = 0
+val semNull = -1
+
+val skNone = 0
+val skPredicate = 1
+val skPrecedence = 2
+val skAnd = 3
+val skOr = 4
+
+class SemanticPool(
+    var kind: array<int>,
+    var a: array<int>,
+    var b: array<int>,
+    var flag: array<bool>,
+    var opStart: array<int>,
+    var opLen: array<int>,
+    var flatOps: array<int>,
+    var index: Map<string, int>
+) {
+    fun intern(key: string, k: int, va: int, vb: int, f: bool, ops: array<int>): int {
+        var id = 0
+        val found = index.get(key)
+        if (found != null) id = found
+        else {
+            id = kind.size
+            kind.append(k)
+            a.append(va)
+            b.append(vb)
+            flag.append(f)
+            opStart.append(flatOps.size)
+            opLen.append(ops.size)
+            for (o in ops) flatOps.append(o)
+            index.set(key, id)
+        }
+        id
+    }
+
+    fun predicate(ruleIndex: int, predIndex: int, ctxDependent: bool): int =
+        intern("p$ruleIndex,$predIndex,${if (ctxDependent) 1 else 0}", skPredicate, ruleIndex, predIndex, ctxDependent, [])
+
+    fun precedence(prec: int): int = intern("c$prec", skPrecedence, prec, 0, false, [])
+
+    fun operands(s: int): array<int> {
+        val result: array<int> = []
+        for (i in 0 until opLen[s]) result.append(flatOps[opStart[s] + i])
+        result
+    }
+
+    fun combine(k: int, x: int, y: int): int {
+        val ops: array<int> = []
+        if (kind[x] == k) {
+            for (o in operands(x)) if (!ops.contains(o)) ops.append(o)
+        } else if (!ops.contains(x)) ops.append(x)
+        if (kind[y] == k) {
+            for (o in operands(y)) if (!ops.contains(o)) ops.append(o)
+        } else if (!ops.contains(y)) ops.append(y)
+        var result = 0
+        if (ops.size == 1) result = ops[0]
+        else {
+            var key = if (k == skAnd) "&" else "|"
+            for (o in ops) key = key + "$o,"
+            result = intern(key, k, 0, 0, false, ops)
+        }
+        result
+    }
+
+    fun andContext(x: int, y: int): int =
+        if (x == semNull || x == semNone) y
+        else if (y == semNull || y == semNone) x
+        else combine(skAnd, x, y)
+
+    fun orContext(x: int, y: int): int =
+        if (x == semNull) y
+        else if (y == semNull) x
+        else if (x == semNone || y == semNone) semNone
+        else combine(skOr, x, y)
+}
+
+fun array<int>.contains(v: int): bool {
+    var found = false
+    for (x in this) if (x == v) found = true
+    found
+}
+
+fun semanticPool(): SemanticPool = SemanticPool([skNone], [-1], [-1], [false], [0], [0], [], Map())

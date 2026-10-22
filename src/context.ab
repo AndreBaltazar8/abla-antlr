@@ -1,0 +1,223 @@
+// Prediction contexts (graph-structured rule stacks), hash-consed: equal
+// contexts share one id, so the runtime's structural equality is id equality.
+// Id 0 is EMPTY; -1 stands for a null context.
+
+import "atn.ab"
+
+val ctxEmpty = 0
+val ctxNull = -1
+val ctxNone = -2
+
+val pcSingleton = 0
+val pcArray = 1
+
+class ContextPool(
+    var kind: array<int>,
+    var parent: array<int>,
+    var ret: array<int>,
+    var arrStart: array<int>,
+    var arrLen: array<int>,
+    var flatParents: array<int>,
+    var flatReturns: array<int>,
+    var singletons: Map<int, int>,
+    var arrays: Map<string, int>,
+    var mergeCache: Map<int, int>,
+    var mergeCacheOn: bool
+) {
+    fun singleton(p: int, rs: int): int {
+        var id = ctxEmpty
+        if (!(rs == emptyReturnState && p == ctxNull)) {
+            val key = (p + 1) * 4294967296 + rs
+            val found = singletons.get(key)
+            if (found != null) id = found
+            else {
+                id = kind.size
+                kind.append(pcSingleton)
+                parent.append(p)
+                ret.append(rs)
+                arrStart.append(0)
+                arrLen.append(1)
+                singletons.set(key, id)
+            }
+        }
+        id
+    }
+
+    fun makeArray(parents: array<int>, returns: array<int>): int {
+        var key = "a"
+        for (i in 0 until parents.size) key = key + "${parents[i]},${returns[i]};"
+        var id = 0
+        val found = arrays.get(key)
+        if (found != null) id = found
+        else {
+            id = kind.size
+            kind.append(pcArray)
+            parent.append(ctxNull)
+            ret.append(0)
+            arrStart.append(flatParents.size)
+            arrLen.append(parents.size)
+            for (i in 0 until parents.size) {
+                flatParents.append(parents[i])
+                flatReturns.append(returns[i])
+            }
+            arrays.set(key, id)
+        }
+        id
+    }
+
+    fun isSingleton(c: int): bool = c >= 0 && kind[c] == pcSingleton
+
+    fun length(c: int): int = arrLen[c]
+
+    fun getParent(c: int, i: int): int = if (kind[c] == pcSingleton) parent[c] else flatParents[arrStart[c] + i]
+
+    fun getReturnState(c: int, i: int): int = if (kind[c] == pcSingleton) ret[c] else flatReturns[arrStart[c] + i]
+
+    fun isEmpty(c: int): bool = if (kind[c] == pcSingleton) c == ctxEmpty else flatReturns[arrStart[c]] == emptyReturnState
+
+    fun hasEmptyPath(c: int): bool = getReturnState(c, length(c) - 1) == emptyReturnState
+
+    fun cacheGet(a: int, b: int): int {
+        var result = ctxNone
+        if (mergeCacheOn) {
+            val found = mergeCache.get((a + 1) * 4294967296 + (b + 1))
+            if (found != null) result = found
+        }
+        result
+    }
+
+    fun cacheSet(a: int, b: int, value: int): void {
+        if (mergeCacheOn) mergeCache.set((a + 1) * 4294967296 + (b + 1), value)
+    }
+
+    fun merge(a: int, b: int, rootIsWildcard: bool): int {
+        var result = a
+        if (a == b) result = a
+        else if (isSingleton(a) && isSingleton(b)) result = mergeSingletons(a, b, rootIsWildcard)
+        else if (rootIsWildcard && a == ctxEmpty) result = a
+        else if (rootIsWildcard && b == ctxEmpty) result = b
+        else {
+            val aa = if (isSingleton(a)) makeArray([parent[a]], [ret[a]]) else a
+            val bb = if (isSingleton(b)) makeArray([parent[b]], [ret[b]]) else b
+            result = mergeArrays(aa, bb, rootIsWildcard)
+        }
+        result
+    }
+
+    fun mergeRoot(a: int, b: int, rootIsWildcard: bool): int {
+        var result = ctxNone
+        if (rootIsWildcard) {
+            if (a == ctxEmpty || b == ctxEmpty) result = ctxEmpty
+        } else {
+            if (a == ctxEmpty && b == ctxEmpty) result = ctxEmpty
+            else if (a == ctxEmpty) result = makeArray([parent[b], ctxNull], [ret[b], emptyReturnState])
+            else if (b == ctxEmpty) result = makeArray([parent[a], ctxNull], [ret[a], emptyReturnState])
+        }
+        result
+    }
+
+    fun mergeSingletons(a: int, b: int, rootIsWildcard: bool): int {
+        var result = cacheGet(a, b)
+        if (result == ctxNone) result = cacheGet(b, a)
+        if (result == ctxNone) {
+            val rootMerge = mergeRoot(a, b, rootIsWildcard)
+            if (rootMerge != ctxNone) {
+                cacheSet(a, b, rootMerge)
+                result = rootMerge
+            } else if (ret[a] == ret[b]) {
+                val p = merge(parent[a], parent[b], rootIsWildcard)
+                if (p == parent[a]) result = a
+                else if (p == parent[b]) result = b
+                else {
+                    val spc = singleton(p, ret[a])
+                    cacheSet(a, b, spc)
+                    result = spc
+                }
+            } else {
+                val ra = ret[a]
+                val rb = ret[b]
+                if (parent[a] != ctxNull && parent[a] == parent[b]) {
+                    val sp = parent[a]
+                    val apc = if (ra > rb) makeArray([sp, sp], [rb, ra]) else makeArray([sp, sp], [ra, rb])
+                    cacheSet(a, b, apc)
+                    result = apc
+                } else {
+                    val apc = if (ra > rb) makeArray([parent[b], parent[a]], [rb, ra]) else makeArray([parent[a], parent[b]], [ra, rb])
+                    cacheSet(a, b, apc)
+                    result = apc
+                }
+            }
+        }
+        result
+    }
+
+    fun mergeArrays(a: int, b: int, rootIsWildcard: bool): int {
+        var result = cacheGet(a, b)
+        if (result == ctxNone) result = cacheGet(b, a)
+        if (result == ctxNone) {
+            val la = arrLen[a]
+            val lb = arrLen[b]
+            val oa = arrStart[a]
+            val ob = arrStart[b]
+            var i = 0
+            var j = 0
+            val mergedParents: array<int> = []
+            val mergedReturns: array<int> = []
+            while (i < la && j < lb) {
+                val ap = flatParents[oa + i]
+                val bp = flatParents[ob + j]
+                val ar = flatReturns[oa + i]
+                val br = flatReturns[ob + j]
+                if (ar == br) {
+                    val bothDollars = ar == emptyReturnState && ap == ctxNull && bp == ctxNull
+                    val axAx = ap != ctxNull && bp != ctxNull && ap == bp
+                    if (bothDollars || axAx) mergedParents.append(ap)
+                    else mergedParents.append(merge(ap, bp, rootIsWildcard))
+                    mergedReturns.append(ar)
+                    i += 1
+                    j += 1
+                } else if (ar < br) {
+                    mergedParents.append(ap)
+                    mergedReturns.append(ar)
+                    i += 1
+                } else {
+                    mergedParents.append(bp)
+                    mergedReturns.append(br)
+                    j += 1
+                }
+            }
+            if (i < la) {
+                for (p in i until la) {
+                    mergedParents.append(flatParents[oa + p])
+                    mergedReturns.append(flatReturns[oa + p])
+                }
+            } else {
+                for (p in j until lb) {
+                    mergedParents.append(flatParents[ob + p])
+                    mergedReturns.append(flatReturns[ob + p])
+                }
+            }
+            // The JavaScript runtime never trims to a singleton here: its arrays
+            // grow by index, so the k < length test is always false.
+            val m = makeArray(mergedParents, mergedReturns)
+            cacheSet(a, b, m)
+            result = m
+        }
+        result
+    }
+
+    fun beginMergeCache(): void {
+        mergeCache.clear()
+        mergeCacheOn = true
+    }
+
+    fun endMergeCache(): void {
+        mergeCache.clear()
+        mergeCacheOn = false
+    }
+}
+
+fun contextPool(): ContextPool {
+    val pool = ContextPool([pcSingleton], [ctxNull], [emptyReturnState], [0], [1], [], [], Map(), Map(), Map(), false)
+    pool
+}

@@ -1,0 +1,121 @@
+// ATN configurations live in a pool and are referred to by id, because the
+// runtime shares and mutates them across sets (a merge updates the existing
+// configuration in place). Config sets and DFA states hold ids.
+//
+// precedenceFilterSuppressed has three values, as in the JavaScript runtime:
+// a configuration built without a source configuration leaves it undefined,
+// and undefined is not equal to false.
+
+import "context.ab"
+
+val pfsUndefined = 0
+val pfsFalse = 1
+val pfsTrue = 2
+
+class ConfigPool(
+    var state: array<int>,
+    var alt: array<int>,
+    var ctx: array<int>,
+    var sem: array<int>,
+    var reach: array<int>,
+    var suppressed: array<int>,
+    var executor: array<int>,
+    var nonGreedy: array<bool>
+) {
+    fun make(s: int, a: int, c: int, sm: int, r: int, sup: int, ex: int, ng: bool): int {
+        val id = state.size
+        state.append(s)
+        alt.append(a)
+        ctx.append(c)
+        sem.append(sm)
+        reach.append(r)
+        suppressed.append(sup)
+        executor.append(ex)
+        nonGreedy.append(ng)
+        id
+    }
+
+    fun derivedSuppressed(from: int): int = if (suppressed[from] == pfsTrue) pfsTrue else pfsFalse
+
+    // new ATNConfig({state: s}, config)
+    fun withState(s: int, from: int): int =
+        make(s, alt[from], ctx[from], sem[from], reach[from], derivedSuppressed(from), executor[from], nonGreedy[from])
+
+    fun withStateContext(s: int, c: int, from: int): int =
+        make(s, alt[from], c, sem[from], reach[from], derivedSuppressed(from), executor[from], nonGreedy[from])
+
+    fun withSemantic(sm: int, from: int): int =
+        make(state[from], alt[from], ctx[from], sm, reach[from], derivedSuppressed(from), executor[from], nonGreedy[from])
+
+    fun withStateSemantic(s: int, sm: int, from: int): int =
+        make(s, alt[from], ctx[from], sm, reach[from], derivedSuppressed(from), executor[from], nonGreedy[from])
+
+    fun parserKey(c: int): int = (sem[c] * 4096 + alt[c]) * 1048576 + state[c]
+
+    fun lexerKey(c: int): string =
+        "${state[c]},${alt[c]},${ctx[c]},${sem[c]},${suppressed[c]},${executor[c]},${if (nonGreedy[c]) 1 else 0}"
+
+    fun mark(): int = state.size
+
+    fun truncateTo(n: int): void {
+        state.truncate(n)
+        alt.truncate(n)
+        ctx.truncate(n)
+        sem.truncate(n)
+        reach.truncate(n)
+        suppressed.truncate(n)
+        executor.truncate(n)
+        nonGreedy.truncate(n)
+    }
+}
+
+fun configPool(): ConfigPool = ConfigPool([], [], [], [], [], [], [], [])
+
+class ConfigSet(
+    var items: array<int>,
+    var lookup: Map<int, int>,
+    var lookupText: Map<string, int>,
+    val lexer: bool,
+    val fullCtx: bool,
+    var readOnly: bool,
+    var uniqueAlt: int,
+    var conflictId: int,
+    var conflictingAlts: array<int>,
+    var hasSemanticContext: bool,
+    var dipsIntoOuterContext: bool
+)
+
+fun configSet(fullCtx: bool): ConfigSet = ConfigSet([], Map(), Map(), false, fullCtx, false, 0, 0, [], false, false)
+
+// OrderedATNConfigSet: full configuration equality, contexts never wildcard.
+fun lexerConfigSet(): ConfigSet = ConfigSet([], Map(), Map(), true, true, false, 0, 0, [], false, false)
+
+class DfaState(
+    var configs: ConfigSet,
+    var edges: array<int>,
+    var isAccept: bool,
+    var prediction: int,
+    var requiresFullContext: bool,
+    var hasPredicates: bool,
+    var predicates: array<int>,
+    var executor: int
+)
+
+fun dfaState(configs: ConfigSet): DfaState = DfaState(configs, [], false, 0, false, false, [], -1)
+
+val dfaError = -2
+val dfaNone = -1
+
+class Dfa(
+    val atnStartState: int,
+    val decision: int,
+    var states: array<DfaState>,
+    var lookup: Map<string, int>,
+    var s0: int,
+    val precedenceDfa: bool,
+    var precedenceStarts: array<int>,
+    var s0Configs: ConfigSet?
+)
+
+fun dfaFor(atnStartState: int, decision: int, precedenceDfa: bool): Dfa =
+    Dfa(atnStartState, decision, [], Map(), dfaNone, precedenceDfa, [], null)

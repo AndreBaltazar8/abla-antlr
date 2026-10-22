@@ -1,0 +1,520 @@
+// The lexer: LexerATNSimulator and Lexer.nextToken of the antlr4 JavaScript
+// runtime, over UTF-16 code units (what a JavaScript InputStream holds).
+
+import "atn.ab"
+import "context.ab"
+import "semantic.ab"
+import "configs.ab"
+
+val lexerSkip = -3
+val lexerMore = -2
+val defaultChannel = 0
+val minDfaEdge = 0
+val maxDfaEdge = 127
+
+class Tokens(
+    var type: array<int>,
+    var channel: array<int>,
+    var start: array<int>,
+    var stop: array<int>,
+    var line: array<int>,
+    var column: array<int>,
+    var text: array<string>,
+    var tokenIndex: array<int>
+) {
+    fun add(ty: int, ch: int, st: int, sp: int, ln: int, col: int, tx: string, index: int): int {
+        val id = type.size
+        type.append(ty)
+        channel.append(ch)
+        start.append(st)
+        stop.append(sp)
+        line.append(ln)
+        column.append(col)
+        text.append(tx)
+        tokenIndex.append(index)
+        id
+    }
+
+    fun count(): int = type.size
+}
+
+fun tokens(): Tokens = Tokens([], [], [], [], [], [], [], [])
+
+fun copyInts(xs: array<int>): array<int> {
+    val result: array<int> = []
+    for (x in xs) result.append(x)
+    result
+}
+
+class LexError(val line: int, val column: int, val message: string)
+
+// Source text as UTF-16 code units, with the byte offset of each unit so token
+// text can be cut from the UTF-8 original.
+class SourceText(val text: string, val units: array<int>, val unitByte: array<int>) {
+    fun size(): int = units.size
+
+    fun getText(start: int, stop: int): string {
+        var e = stop
+        if (e >= units.size) e = units.size - 1
+        var result = ""
+        if (start < units.size && start <= e) result = text.slice(unitByte[start], unitByte[e + 1])
+        result
+    }
+}
+
+fun sourceText(text: string): SourceText {
+    val units: array<int> = []
+    val unitByte: array<int> = []
+    var i = 0
+    val n = text.size
+    while (i < n) {
+        val b0 = text[i]
+        var cp = 65533
+        var len = 1
+        if (b0 < 128) {
+            cp = b0
+        } else if (b0 >= 194 && b0 <= 223 && i + 1 < n && (text[i + 1] & 192) == 128) {
+            cp = ((b0 & 31) << 6) | (text[i + 1] & 63)
+            len = 2
+        } else if (b0 >= 224 && b0 <= 239 && i + 2 < n && (text[i + 1] & 192) == 128 && (text[i + 2] & 192) == 128) {
+            val v = ((b0 & 15) << 12) | ((text[i + 1] & 63) << 6) | (text[i + 2] & 63)
+            if (v >= 2048 && !(v >= 55296 && v <= 57343)) {
+                cp = v
+                len = 3
+            }
+        } else if (b0 >= 240 && b0 <= 244 && i + 3 < n && (text[i + 1] & 192) == 128 && (text[i + 2] & 192) == 128 && (text[i + 3] & 192) == 128) {
+            val v = ((b0 & 7) << 18) | ((text[i + 1] & 63) << 12) | ((text[i + 2] & 63) << 6) | (text[i + 3] & 63)
+            if (v >= 65536 && v <= 1114111) {
+                cp = v
+                len = 4
+            }
+        }
+        if (cp > 65535) {
+            val v = cp - 65536
+            units.append(55296 + (v >> 10))
+            unitByte.append(i)
+            units.append(56320 + (v & 1023))
+            unitByte.append(i)
+        } else {
+            units.append(cp)
+            unitByte.append(i)
+        }
+        i += len
+    }
+    unitByte.append(n)
+    SourceText(text, units, unitByte)
+}
+
+// Lexer action executors, hash-consed. Each entry is a canonical action id and
+// the offset of a LexerIndexedCustomAction (-1 for a plain action).
+class ExecutorPool(
+    var start: array<int>,
+    var len: array<int>,
+    var flatAction: array<int>,
+    var flatOffset: array<int>,
+    var index: Map<string, int>
+) {
+    fun intern(actions: array<int>, offsets: array<int>): int {
+        var key = ""
+        for (i in 0 until actions.size) key = key + "${actions[i]}@${offsets[i]};"
+        var id = 0
+        val found = index.get(key)
+        if (found != null) id = found
+        else {
+            id = start.size
+            start.append(flatAction.size)
+            len.append(actions.size)
+            for (i in 0 until actions.size) {
+                flatAction.append(actions[i])
+                flatOffset.append(offsets[i])
+            }
+            index.set(key, id)
+        }
+        id
+    }
+
+    fun append(executor: int, action: int): int {
+        val actions: array<int> = []
+        val offsets: array<int> = []
+        if (executor >= 0) {
+            for (i in 0 until len[executor]) {
+                actions.append(flatAction[start[executor] + i])
+                offsets.append(flatOffset[start[executor] + i])
+            }
+        }
+        actions.append(action)
+        offsets.append(-1)
+        intern(actions, offsets)
+    }
+}
+
+fun executorPool(): ExecutorPool = ExecutorPool([], [], [], [], Map())
+
+class Lexer(
+    var contexts: ContextPool,
+    var configs: ConfigPool,
+    var executors: ExecutorPool,
+    var dfas: array<Dfa>,
+    var input: SourceText,
+    var index: int,
+    var line: int,
+    var column: int,
+    var startIndex: int,
+    var mode: int,
+    var modeStack: array<int>,
+    var prevIndex: int,
+    var prevLine: int,
+    var prevColumn: int,
+    var prevState: int,
+    var hitEof: bool,
+    var tokenType: int,
+    var tokenChannel: int,
+    var tokenStartIndex: int,
+    var tokenStartLine: int,
+    var tokenStartColumn: int,
+    var tokenEmitted: bool,
+    var out: Tokens,
+    var errors: array<LexError>
+) {
+    fun la1(): int = if (index < input.units.size) input.units[index] else tokenEof
+
+    fun consumeChar(): void {
+        if (la1() == 10) {
+            line += 1
+            column = 0
+        } else column += 1
+        index += 1
+    }
+
+    fun dfaKey(set: ConfigSet): string {
+        var key = ""
+        for (c in set.items) key = key + configs.lexerKey(c) + ";"
+        key
+    }
+
+    fun addConfig(var set: ConfigSet, c: int): void {
+        if (configs.sem[c] != semNone) set.hasSemanticContext = true
+        if (configs.reach[c] > 0) set.dipsIntoOuterContext = true
+        val key = configs.lexerKey(c)
+        val existing = set.lookupText.get(key)
+        if (existing == null) {
+            set.lookupText.set(key, c)
+            set.items.append(c)
+        } else {
+            val e = existing
+            val merged = contexts.merge(configs.ctx[e], configs.ctx[c], !set.fullCtx)
+            if (configs.reach[c] > configs.reach[e]) configs.reach[e] = configs.reach[c]
+            if (configs.suppressed[c] == pfsTrue) configs.suppressed[e] = pfsTrue
+            configs.ctx[e] = merged
+        }
+    }
+
+    fun isDecisionState(atn: Atn, s: int): bool {
+        val k = atn.stateType[s]
+        k == stBlockStart || k == stPlusBlockStart || k == stStarBlockStart || k == stPlusLoopBack || k == stStarLoopEntry || k == stTokenStart
+    }
+
+    // new LexerATNConfig({state, context?, lexerActionExecutor?}, config)
+    fun derive(atn: Atn, s: int, ctx: int, executor: int, from: int): int {
+        val ng = configs.nonGreedy[from] || (isDecisionState(atn, s) && atn.nonGreedy[s])
+        val ex = if (executor >= 0) executor else configs.executor[from]
+        val c = if (ctx == ctxNull) configs.ctx[from] else ctx
+        configs.make(s, configs.alt[from], c, configs.sem[from], configs.reach[from], configs.derivedSuppressed(from), ex, ng)
+    }
+
+    fun addDfaState(atn: Atn, var set: ConfigSet): int {
+        val dfaIndex = mode
+        val key = dfaKey(set)
+        var result = 0
+        val found = dfas[dfaIndex].lookup.get(key)
+        if (found != null) result = found
+        else {
+            var accept = false
+            var executor = -1
+            var prediction = 0
+            var done = false
+            for (c in set.items) {
+                if (!done && atn.stateType[configs.state[c]] == stRuleStop) {
+                    accept = true
+                    executor = configs.executor[c]
+                    prediction = atn.ruleToTokenType[atn.stateRule[configs.state[c]]]
+                    done = true
+                }
+            }
+            set.readOnly = true
+            val st = DfaState(set, [], accept, prediction, false, false, [], executor)
+            result = dfas[dfaIndex].states.size
+            dfas[dfaIndex].states.append(st)
+            dfas[dfaIndex].lookup.set(key, result)
+        }
+        result
+    }
+
+    fun closure(atn: Atn, c: int, var set: ConfigSet, currentAltReachedAcceptState: bool, speculative: bool, treatEofAsEpsilon: bool): bool {
+        var reached = currentAltReachedAcceptState
+        val s = configs.state[c]
+        val ctx = configs.ctx[c]
+        if (atn.stateType[s] == stRuleStop) {
+            if (ctx == ctxNull || contexts.hasEmptyPath(ctx)) {
+                if (ctx == ctxNull || contexts.isEmpty(ctx)) {
+                    addConfig(set, c)
+                    return true
+                }
+                addConfig(set, derive(atn, s, ctxEmpty, -1, c))
+                reached = true
+            }
+            if (ctx != ctxNull && !contexts.isEmpty(ctx)) {
+                for (i in 0 until contexts.length(ctx)) {
+                    val rs = contexts.getReturnState(ctx, i)
+                    if (rs != emptyReturnState) {
+                        val next = derive(atn, rs, contexts.getParent(ctx, i), -1, c)
+                        reached = closure(atn, next, set, reached, speculative, treatEofAsEpsilon)
+                    }
+                }
+            }
+            return reached
+        }
+        if (!atn.epsilonOnly[s]) {
+            if (!reached || !configs.nonGreedy[c]) addConfig(set, c)
+        }
+        for (t in atn.stateTrans[s]) {
+            val next = epsilonTarget(atn, c, t, set, speculative, treatEofAsEpsilon)
+            if (next >= 0) reached = closure(atn, next, set, reached, speculative, treatEofAsEpsilon)
+        }
+        reached
+    }
+
+    fun epsilonTarget(atn: Atn, c: int, t: int, var set: ConfigSet, speculative: bool, treatEofAsEpsilon: bool): int {
+        var result = -1
+        val k = atn.transType[t]
+        if (k == trRule) {
+            val ctx = contexts.singleton(configs.ctx[c], atn.transFollow[t])
+            result = derive(atn, atn.transTarget[t], ctx, -1, c)
+        } else if (k == trPredicate) {
+            set.hasSemanticContext = true
+            result = derive(atn, atn.transTarget[t], ctxNull, -1, c)
+        } else if (k == trAction) {
+            val ctx = configs.ctx[c]
+            if (ctx == ctxNull || contexts.hasEmptyPath(ctx)) {
+                val executor = executors.append(configs.executor[c], atn.lexerActionCanon[atn.transB[t]])
+                result = derive(atn, atn.transTarget[t], ctxNull, executor, c)
+            } else result = derive(atn, atn.transTarget[t], ctxNull, -1, c)
+        } else if (k == trEpsilon) {
+            result = derive(atn, atn.transTarget[t], ctxNull, -1, c)
+        } else if (k == trAtom || k == trRange || k == trSet) {
+            if (treatEofAsEpsilon && atn.matches(t, tokenEof, 0, lexerMaxChar)) result = derive(atn, atn.transTarget[t], ctxNull, -1, c)
+        }
+        result
+    }
+
+    fun computeStartState(atn: Atn, p: int): ConfigSet {
+        val set = lexerConfigSet()
+        val trans = atn.stateTrans[p]
+        for (i in 0 until trans.size) {
+            val target = atn.transTarget[trans[i]]
+            val c = configs.make(target, i + 1, ctxEmpty, semNone, 0, pfsUndefined, -1, false)
+            closure(atn, c, set, false, false, false)
+        }
+        set
+    }
+
+    // fixOffsetBeforeMatch: position-dependent (custom) actions get the offset.
+    fun fixOffset(atn: Atn, executor: int, offset: int): int {
+        var result = executor
+        val n = executors.len[executor]
+        var changed = false
+        val actions: array<int> = []
+        val offsets: array<int> = []
+        for (i in 0 until n) {
+            val a = executors.flatAction[executors.start[executor] + i]
+            val o = executors.flatOffset[executors.start[executor] + i]
+            actions.append(a)
+            if (atn.lexerActionType[a] == laCustom && o < 0) {
+                offsets.append(offset)
+                changed = true
+            } else offsets.append(o)
+        }
+        if (changed) result = executors.intern(actions, offsets)
+        result
+    }
+
+    fun reachableConfigSet(atn: Atn, items: array<int>, var reach: ConfigSet, t: int): void {
+        var skipAlt = 0
+        for (c in items) {
+            val currentAltReachedAcceptState = configs.alt[c] == skipAlt
+            if (!(currentAltReachedAcceptState && configs.nonGreedy[c])) {
+                for (tr in atn.stateTrans[configs.state[c]]) {
+                    if (atn.matches(tr, t, 0, lexerMaxChar)) {
+                        var executor = configs.executor[c]
+                        if (executor >= 0) executor = fixOffset(atn, executor, index - startIndex)
+                        val next = derive(atn, atn.transTarget[tr], ctxNull, executor, c)
+                        if (closure(atn, next, reach, currentAltReachedAcceptState, true, t == tokenEof)) skipAlt = configs.alt[c]
+                    }
+                }
+            }
+        }
+    }
+
+    fun existingTarget(s: int, t: int): int {
+        var result = dfaNone
+        if (t >= minDfaEdge && t <= maxDfaEdge && dfas[mode].states[s].edges.size > 0) result = dfas[mode].states[s].edges[t - minDfaEdge]
+        result
+    }
+
+    fun setEdge(from: int, t: int, to: int): void {
+        if (t >= minDfaEdge && t <= maxDfaEdge) {
+            if (dfas[mode].states[from].edges.size == 0) dfas[mode].states[from].edges = filledArray(maxDfaEdge - minDfaEdge + 1, dfaNone)
+            dfas[mode].states[from].edges[t - minDfaEdge] = to
+        }
+    }
+
+    fun computeTarget(atn: Atn, s: int, t: int): int {
+        var result = dfaError
+        val reach = lexerConfigSet()
+        reachableConfigSet(atn, copyInts(dfas[mode].states[s].configs.items), reach, t)
+        if (reach.items.size == 0) {
+            if (!reach.hasSemanticContext) setEdge(s, t, dfaError)
+        } else {
+            val suppressEdge = reach.hasSemanticContext
+            reach.hasSemanticContext = false
+            val to = addDfaState(atn, reach)
+            if (!suppressEdge) setEdge(s, t, to)
+            result = to
+        }
+        result
+    }
+
+    fun capture(s: int): void {
+        prevIndex = index
+        prevLine = line
+        prevColumn = column
+        prevState = s
+    }
+
+    fun execute(atn: Atn, executor: int): void {
+        if (executor >= 0) {
+            for (i in 0 until executors.len[executor]) {
+                val a = executors.flatAction[executors.start[executor] + i]
+                val k = atn.lexerActionType[a]
+                val d = atn.lexerActionA[a]
+                if (k == laChannel) tokenChannel = d
+                else if (k == laSkip) tokenType = lexerSkip
+                else if (k == laMore) tokenType = lexerMore
+                else if (k == laType) tokenType = d
+                else if (k == laMode) mode = d
+                else if (k == laPushMode) {
+                    modeStack.append(mode)
+                    mode = d
+                } else if (k == laPopMode) {
+                    if (modeStack.size > 0) {
+                        mode = modeStack[modeStack.size - 1]
+                        modeStack.truncate(modeStack.size - 1)
+                    }
+                }
+            }
+        }
+    }
+
+    // Returns the predicted token type, or lexerSkip after a recognition error.
+    fun execAtn(atn: Atn, ds0: int): int {
+        if (dfas[mode].states[ds0].isAccept) capture(ds0)
+        var t = la1()
+        var s = ds0
+        var going = true
+        while (going) {
+            var target = existingTarget(s, t)
+            if (target == dfaNone) target = computeTarget(atn, s, t)
+            if (target == dfaError) going = false
+            else {
+                if (t != tokenEof) consumeChar()
+                if (dfas[mode].states[target].isAccept) {
+                    capture(target)
+                    if (t == tokenEof) going = false
+                }
+                if (going) {
+                    t = la1()
+                    s = target
+                }
+            }
+        }
+        var result = lexerSkip
+        if (prevState >= 0) {
+            val st = prevState
+            index = prevIndex
+            line = prevLine
+            column = prevColumn
+            execute(atn, dfas[mode].states[st].executor)
+            result = dfas[mode].states[st].prediction
+        } else if (t == tokenEof && index == startIndex) result = tokenEof
+        else {
+            val text = input.getText(tokenStartIndex, index)
+            errors.append(LexError(tokenStartLine, tokenStartColumn, "token recognition error at: '$text'"))
+            if (la1() != tokenEof) consumeChar()
+        }
+        result
+    }
+
+    fun matchToken(atn: Atn): int {
+        startIndex = index
+        prevIndex = -1
+        prevLine = 0
+        prevColumn = -1
+        prevState = -1
+        var result = 0
+        if (dfas[mode].s0 == dfaNone) {
+            val s0 = computeStartState(atn, atn.modeToStart[mode])
+            val suppressEdge = s0.hasSemanticContext
+            s0.hasSemanticContext = false
+            val next = addDfaState(atn, s0)
+            if (!suppressEdge) dfas[mode].s0 = next
+            result = execAtn(atn, next)
+        } else result = execAtn(atn, dfas[mode].s0)
+        result
+    }
+
+    fun emitToken(ty: int, ch: int, st: int, sp: int, ln: int, col: int): void {
+        val n = input.units.size
+        val text = if (st < n && sp < n) input.getText(st, sp) else "<EOF>"
+        out.add(ty, ch, st, sp, ln, col, text, out.count())
+        return
+    }
+
+    fun nextToken(atn: Atn): void {
+        var done = false
+        while (!done) {
+            if (hitEof) {
+                emitToken(tokenEof, defaultChannel, index, index - 1, line, column)
+                done = true
+            } else {
+                tokenChannel = defaultChannel
+                tokenStartIndex = index
+                tokenStartColumn = column
+                tokenStartLine = line
+                var skipped = false
+                var inner = true
+                while (inner) {
+                    tokenType = 0
+                    val ttype = matchToken(atn)
+                    if (la1() == tokenEof) hitEof = true
+                    if (tokenType == 0) tokenType = ttype
+                    if (tokenType == lexerSkip) {
+                        skipped = true
+                        inner = false
+                    } else if (tokenType != lexerMore) inner = false
+                }
+                if (!skipped) {
+                    emitToken(tokenType, tokenChannel, tokenStartIndex, index - 1, tokenStartLine, tokenStartColumn)
+                    done = true
+                }
+            }
+        }
+    }
+
+    fun tokenizeAll(atn: Atn): void {
+        var going = true
+        while (going) {
+            nextToken(atn)
+            if (out.type[out.count() - 1] == tokenEof) going = false
+        }
+    }
+}

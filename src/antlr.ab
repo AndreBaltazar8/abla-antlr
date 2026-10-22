@@ -12,6 +12,8 @@ import "grammar.ab"
 import "engine.ab"
 import "interpret.ab"
 import "g4.ab"
+import "script_tables.ab"
+import "host_parser.ab"
 import "abla/text"
 
 val nodeRule = 0
@@ -64,7 +66,7 @@ fun antlrLoad(lexerInterp: string, parserInterp: string): Antlr {
     val lexerDfas: array<Dfa> = []
     for (m in 0 until lexerAtn.modeToStart.size) lexerDfas.append(dfaFor(lexerAtn.modeToStart[m], m, false))
     val lexer = Lexer(contextPool(), configPool(), executorPool(), lexerDfas,
-        sourceText(""), 0, 1, 0, -1, 0, [], -1, 0, -1, -1, false, 0, 0, -1, -1, -1, false, tokens(), [])
+        sourceText(""), 0, 1, 0, -1, 0, [], -1, 0, -1, -1, false, 0, 0, -1, -1, -1, false, tokens(), [], Map(), [], [], [], false, 0)
     val parserDfas: array<Dfa> = []
     val atn = grammar.atn
     for (d in 0 until atn.decisionToState.size) {
@@ -80,17 +82,42 @@ fun antlrLoad(lexerInterp: string, parserInterp: string): Antlr {
 // lexer grammar alone, parserGrammar is "".
 fun antlrLoadGrammars(sources: Map<string, string>, lexerGrammar: string, parserGrammar: string): Antlr {
     val lexerOut = g4Compile(sources, lexerGrammar)
-    var lexerInterp = lexerOut.lexerInterp
-    var parserInterp = lexerOut.parserInterp
     var error = lexerOut.error
-    if (error.size == 0 && parserGrammar != lexerGrammar && parserGrammar.size > 0) {
-        val parserOut = g4Compile(sources, parserGrammar)
-        parserInterp = parserOut.parserInterp
-        error = parserOut.error
-    }
-    if (error.size == 0 && lexerInterp.size == 0) error = "$lexerGrammar has no lexer rules"
+    if (error.size == 0 && lexerOut.lexerInterp.size == 0) error = "$lexerGrammar has no lexer rules"
     if (error.size > 0) return antlrFailed(error)
-    antlrLoad(lexerInterp, parserInterp)
+    if (parserGrammar.size == 0) return antlrWithScripts(lexerOut, lexerOut, true)
+    if (parserGrammar == lexerGrammar) return antlrWithScripts(lexerOut, lexerOut, false)
+    val parserOut = g4Compile(sources, parserGrammar)
+    if (parserOut.error.size > 0) return antlrFailed(parserOut.error)
+    antlrWithScripts(lexerOut, parserOut, false)
+}
+
+fun antlrWithScripts(lexerOut: G4Output, parserOut: G4Output, lexerOnly: bool): Antlr {
+    val antlr = antlrLoad(lexerOut.lexerInterp, if (lexerOnly) "" else parserOut.parserInterp)
+    if (antlr.error.size == 0) {
+        antlr.lexerAtn.script = lexerScriptTables(lexerOut, parseInterp(lexerOut.lexerInterp))
+        if (!lexerOnly) antlr.parser.atn.script = parserScriptTables(parserOut, parseInterp(parserOut.parserInterp))
+    }
+    antlr
+}
+
+// Runs the grammars' actions and predicates in the action language
+// (script.ab); off by default, when actions do nothing and predicates hold.
+// Turning them on runs the members actions.
+fun Antlr.useActions(): void {
+    lexerAtn.script.enabled = true
+    parser.atn.script.enabled = true
+    engine.lexer.runLexerMembers(lexerAtn)
+    engine.runParserMembers(parser)
+}
+
+fun Antlr.actionErrors(): array<string> {
+    val errors: array<string> = []
+    for (e in lexerAtn.script.code.errors) errors.append(e)
+    for (e in parser.atn.script.code.errors) errors.append(e)
+    for (e in engine.lexer.failures) errors.append(e)
+    for (e in engine.failures) errors.append(e)
+    errors
 }
 
 fun antlrFailed(error: string): Antlr {
@@ -212,7 +239,7 @@ fun Antlr.parse(source: string, startRule: string): AntlrResult {
     resetLexer(source)
     resetEngine()
     val rule = parser.ruleIndex(startRule)
-    val root = if (rule >= 0) engine.invokeRule(parser, rule, 0) else engine.newContext(0, -1, -1)
+    val root = if (rule >= 0) engine.invokeRule(parser, rule, 0, []) else engine.newContext(0, -1, -1)
     val messages = antlrErrorList(engine.messages)
     engine.fill()
     val tokenList: array<AntlrToken> = []

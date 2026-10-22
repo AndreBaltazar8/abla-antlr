@@ -8,6 +8,7 @@ import "configs.ab"
 import "grammar.ab"
 import "engine.ab"
 import "intervalset.ab"
+import "host_parser.ab"
 
 fun Engine.addConfig(var set: ConfigSet, c: int, useCache: bool): void {
     if (configs.sem[c] != semNone) set.hasSemanticContext = true
@@ -75,15 +76,17 @@ fun Engine.predictionContextFrom(g: ParserGrammar, ctx: int): int {
     result
 }
 
-fun Engine.evaluate(s: int): bool {
+fun Engine.evaluate(g: ParserGrammar, s: int): bool {
     val k = sems.kind[s]
     var result = true
     if (k == skPrecedence) result = precpred(sems.a[s])
-    else if (k == skAnd) {
-        for (o in sems.operands(s)) if (result && !evaluate(o)) result = false
+    else if (k == skPredicate) {
+        if (g.atn.script.enabled) result = testPredicate(g, sems.b[s], if (sems.flag[s]) predictOuter else -1)
+    } else if (k == skAnd) {
+        for (o in sems.operands(s)) if (result && !evaluate(g, o)) result = false
     } else if (k == skOr) {
         result = false
-        for (o in sems.operands(s)) if (!result && evaluate(o)) result = true
+        for (o in sems.operands(s)) if (!result && evaluate(g, o)) result = true
     }
     result
 }
@@ -258,7 +261,7 @@ fun Engine.epsilonTarget(g: ParserGrammar, c: int, t: int, collect: bool, inCont
             if (fullCtx) {
                 val current = index
                 seek(predictStart)
-                val ok = evaluate(pred)
+                val ok = evaluate(g, pred)
                 seek(current)
                 if (ok) result = configs.withState(atn.transTarget[t], c)
             } else {
@@ -512,7 +515,7 @@ fun Engine.computeTargetState(g: ParserGrammar, d: int, previous: int, t: int): 
     result
 }
 
-fun Engine.evalSemanticContext(pairs: array<int>, complete: bool): array<int> {
+fun Engine.evalSemanticContext(g: ParserGrammar, pairs: array<int>, complete: bool): array<int> {
     val alts: array<int> = []
     var stop = false
     var i = 0
@@ -522,7 +525,7 @@ fun Engine.evalSemanticContext(pairs: array<int>, complete: bool): array<int> {
         if (pred == semNone) {
             if (!alts.contains(alt)) alts.append(alt)
             if (!complete) stop = true
-        } else if (evaluate(pred)) {
+        } else if (evaluate(g, pred)) {
             if (!alts.contains(alt)) alts.append(alt)
             if (!complete) stop = true
         }
@@ -547,7 +550,7 @@ fun Engine.synValidOrSemInvalidAlt(g: ParserGrammar, items: array<int>, fullCtx:
     val failed = configSet(fullCtx)
     for (c in items) {
         if (configs.sem[c] != semNone) {
-            if (evaluate(configs.sem[c])) addConfig(succeeded, c, false) else addConfig(failed, c, false)
+            if (evaluate(g, configs.sem[c])) addConfig(succeeded, c, false) else addConfig(failed, c, false)
         } else addConfig(succeeded, c, false)
     }
     var alt = altThatFinishedDecisionEntryRule(g, succeeded)
@@ -629,7 +632,7 @@ fun Engine.execAtn(g: ParserGrammar, d: int, s0: int, startIndex: int, outer: in
             if (dfas[d].states[target].hasPredicates) {
                 val conflictIndex = index
                 if (conflictIndex != startIndex) seek(startIndex)
-                val alts = evalSemanticContext(copyInts(dfas[d].states[target].predicates), true)
+                val alts = evalSemanticContext(g, copyInts(dfas[d].states[target].predicates), true)
                 if (alts.size == 1) {
                     result = alts[0]
                     resolved = true
@@ -644,7 +647,7 @@ fun Engine.execAtn(g: ParserGrammar, d: int, s0: int, startIndex: int, outer: in
             if (!dfas[d].states[target].hasPredicates) result = dfas[d].states[target].prediction
             else {
                 seek(startIndex)
-                val alts = evalSemanticContext(copyInts(dfas[d].states[target].predicates), true)
+                val alts = evalSemanticContext(g, copyInts(dfas[d].states[target].predicates), true)
                 if (alts.size == 0) throwNoViableAlt(startIndex, lt(1), outer)
                 else result = minOf(alts)
             }

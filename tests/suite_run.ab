@@ -33,16 +33,21 @@ fun main: int {
         return 2
     }
     antlr.codePoints = true
+    antlr.useActions()
+    antlr.engine.diagnostics = processArgument(5) == "1"
     val out = bufferedStandardOutput()
     if (lexerOnly) {
         val tokens = antlr.tokenize(input)
+        for (o in antlr.engine.lexer.output) out.write(o)
         for (e in tokens.errors) eprintln("line ${e.line}:${e.column} ${e.message}")
         for (t in tokens.tokens) out.writeLine(tokenString(t))
         if (showDfa) out.write(antlr.lexerDfaText(0))
     } else {
         val result = antlr.parse(input, startRule)
+        for (o in antlr.engine.output) out.write(o)
         for (e in result.messages) eprintln("line ${e.line}:${e.column} ${e.message}")
     }
+    for (e in antlr.actionErrors()) eprintln("action: $e")
     out.flush()
     0
 }

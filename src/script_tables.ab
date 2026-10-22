@@ -1,0 +1,65 @@
+// Builds a grammar's ScriptTables from what g4Compile reports about its
+// action code.
+
+import "script.ab"
+import "atn.ab"
+import "g4tool.ab"
+import "g4atn.ab"
+
+fun tokenTypesOf(interp: InterpFile): Map<string, int> {
+    val types: Map<string, int> = Map()
+    for (t in 0 until interp.symbolicNames.size) {
+        val n = interp.symbolicNames[t]
+        if (n != null) types.set(n, t)
+    }
+    types
+}
+
+fun lexerScriptTables(out: G4Output, interp: InterpFile): ScriptTables {
+    val t = scriptTables()
+    t.tokenTypes = tokenTypesOf(interp)
+    if (out.lexerMembers.size > 0) t.members = t.code.parseStatements(actionBody(out.lexerMembers))
+    for (a in out.lexerActions) t.lexerActions.append(t.code.parseStatements(actionBody(a)))
+    for (p in out.lexerPredicates) {
+        t.predicates.append(t.code.parseExpression(actionBody(p)))
+        t.predicateTexts.append(actionBody(p))
+    }
+    t
+}
+
+fun parserScriptTables(out: G4Output, interp: InterpFile): ScriptTables {
+    val t = scriptTables()
+    t.tokenTypes = tokenTypesOf(interp)
+    if (out.parserMembers.size > 0) t.members = t.code.parseStatements(actionBody(out.parserMembers))
+    for (p in out.parserPredicates) {
+        t.predicates.append(t.code.parseExpression(actionBody(p)))
+        t.predicateTexts.append(actionBody(p))
+    }
+    for (i in 0 until out.parserActionStates.size) t.actionAt.set(out.parserActionStates[i], t.code.parseStatements(actionBody(out.parserActions[i])))
+    for (r in 0 until out.ruleInit.size) {
+        t.ruleInit.append(if (out.ruleInit[r].size > 0) t.code.parseStatements(actionBody(out.ruleInit[r])) else -1)
+        t.ruleAfter.append(if (out.ruleAfter[r].size > 0) t.code.parseStatements(actionBody(out.ruleAfter[r])) else -1)
+        val args = t.code.parseDecls(out.ruleArgs[r])
+        t.ruleArgs.append(args.names)
+        val rets = t.code.parseDecls(out.ruleReturns[r])
+        t.ruleReturns.append(rets.names)
+        t.ruleReturnInits.append(rets.inits)
+        val locals = t.code.parseDecls(out.ruleLocals[r])
+        t.ruleLocals.append(locals.names)
+        t.ruleLocalInits.append(locals.inits)
+        val labels: array<string> = []
+        for (l in out.ruleAltLabels[r]) labels.append(l)
+        t.altLabels.append(labels)
+    }
+    for (i in 0 until out.infoState.size) {
+        val s = out.infoState[i]
+        val k = out.infoKind[i]
+        if (k == infoLabel) t.labels.set(s, out.infoText[i])
+        else if (k == infoListLabel) {
+            t.labels.set(s, out.infoText[i])
+            t.listLabels.set(s, true)
+        } else if (k == infoElement) t.elementNames.set(s, out.infoText[i])
+        else if (k == infoCallArgs) t.callArgs.set(s, t.code.parseList(out.infoText[i]))
+    }
+    t
+}

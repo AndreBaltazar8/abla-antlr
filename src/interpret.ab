@@ -10,6 +10,8 @@ import "engine.ab"
 import "predict.ab"
 import "intervalset.ab"
 import "ll1.ab"
+import "script.ab"
+import "host_parser.ab"
 
 fun escapeWsAndQuote(s: string): string = "'" + s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "'"
 
@@ -148,16 +150,18 @@ fun Engine.match(g: ParserGrammar, ttype: int): bool {
     if (tokType(t) == ttype) {
         endErrorCondition()
         parserConsume()
+        matched = t
     } else {
         val r = recoverInline(g)
         if (r < 0) ok = false
         else if (tokIndex(r) == -1) addTokenNode(r, true)
+        matched = r
     }
     ok
 }
 
 fun Engine.sync(g: ParserGrammar): bool {
-    if (recovering) return true
+    if (recovering || bail) return true
     val s = state
     val la1 = la(1)
     val next = g.nextTokens[s]
@@ -262,6 +266,7 @@ fun Engine.execOp(g: ParserGrammar, op: int): bool {
     if (k == opMatch) {
         state = prog.state[op]
         ok = match(g, prog.a[op])
+        if (ok && g.atn.script.enabled) labelElement(g, prog.state[op], tokenValue(matched))
     } else if (k == opMatchSet) {
         state = prog.state[op]
         val la1 = la(1)
@@ -269,25 +274,41 @@ fun Engine.execOp(g: ParserGrammar, op: int): bool {
         val inSet = label != null && label.contains(la1)
         val fails = if ((prog.flags[op] & flagInvert) != 0) la1 <= 0 || inSet else !inSet
         if (fails) {
-            if (recoverInline(g) < 0) ok = false
+            matched = recoverInline(g)
+            if (matched < 0) ok = false
         } else {
+            matched = lt(1)
             endErrorCondition()
             parserConsume()
         }
+        if (ok && g.atn.script.enabled) labelElement(g, prog.state[op], tokenValue(matched))
     } else if (k == opWildcard) {
         state = prog.state[op]
         if (la(1) > 0) {
+            matched = lt(1)
             endErrorCondition()
             parserConsume()
-        } else if (recoverInline(g) < 0) ok = false
+        } else {
+            matched = recoverInline(g)
+            if (matched < 0) ok = false
+        }
+        if (ok && g.atn.script.enabled) labelElement(g, prog.state[op], tokenValue(matched))
     } else if (k == opInvoke) {
         state = prog.state[op]
-        invokeRule(g, prog.a[op], prog.b[op])
+        if (g.atn.script.enabled) {
+            val args = callArguments(g, prog.state[op])
+            val child = invokeRule(g, prog.a[op], prog.b[op], args)
+            labelElement(g, prog.state[op], svCtxRef(child))
+        } else invokeRule(g, prog.a[op], prog.b[op], [])
     } else if (k == opPrecpred) {
         state = prog.state[op]
         if (!precpred(prog.a[op])) ok = throwFailedPredicate("failed predicate: {this.precpred(this._ctx, ${prog.a[op]})}?")
     } else if (k == opSempred) {
         state = prog.state[op]
+        if (g.atn.script.enabled && !testPredicate(g, prog.b[op], cur)) ok = throwFailedPredicate("failed predicate: {${predicateText(g, prog.b[op])}}?")
+    } else if (k == opAction) {
+        state = prog.state[op]
+        if (g.atn.script.enabled) runAction(g, prog.state[op])
     } else if (k == opLl1Alt) {
         state = prog.state[op]
         ok = sync(g)
@@ -403,12 +424,17 @@ fun Engine.execOp(g: ParserGrammar, op: int): bool {
         cur = localctx
         ctxStart[cur] = ctxStart[previous]
         addChild(cur, previous)
+        if (g.atn.script.enabled) {
+            copyRecursionAttrs(g, previous, cur)
+            labelRecursion(g, prog.state[op], previous)
+        }
     }
     ok
 }
 
-fun Engine.invokeRule(g: ParserGrammar, rule: int, prec: int): int {
+fun Engine.invokeRule(g: ParserGrammar, rule: int, prec: int, args: array<SVal>): int {
     val start = g.atn.ruleToStart[rule]
+    val scripted = g.atn.script.enabled
     var result = 0
     if (!g.ruleLr[rule]) {
         val localctx = newContext(rule, cur, state)
@@ -418,7 +444,9 @@ fun Engine.invokeRule(g: ParserGrammar, rule: int, prec: int): int {
         ctxStart[localctx] = lt(1)
         if (parent >= 0) addChild(parent, localctx)
         if (g.ruleSingleAlt[rule]) ctxAlt[localctx] = 1
+        if (scripted) enterRuleScript(g, rule, localctx, args, false, 0)
         if (!execSeq(g, g.ruleBody[rule])) handleRecognitionError(g)
+        else if (scripted) afterRuleScript(g, rule)
         ctxStop[cur] = lt(-1)
         state = ctxInvoking[cur]
         cur = ctxParent[cur]
@@ -435,7 +463,9 @@ fun Engine.invokeRule(g: ParserGrammar, rule: int, prec: int): int {
         frameParent.append(parentctx)
         frameParentState.append(parentState)
         frameStart.append(start)
+        if (scripted) enterRuleScript(g, rule, localctx, args, true, prec)
         if (!execSeq(g, g.ruleBody[rule])) handleRecognitionError(g)
+        else if (scripted) afterRuleScript(g, rule)
         precStack.truncate(precStack.size - 1)
         ctxStop[cur] = lt(-1)
         val retCtx = cur

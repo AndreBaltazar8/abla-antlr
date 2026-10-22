@@ -1,0 +1,48 @@
+import "abla/io"
+import "../src/script.ab"
+
+class TestHost(var members: Map<string, int>, var vals: array<SVal>, var out: string, var failures: array<string>) : ScriptHost
+
+fun TestHost.scriptThisGet(name: string): SVal {
+    val i = members.get(name)
+    if (i == null) return svUndef()
+    svCopy(vals[i])
+}
+
+fun TestHost.scriptThisSet(name: string, v: SVal): void {
+    val i = members.get(name)
+    if (i == null) {
+        members.set(name, vals.size)
+        vals.append(svCopy(v))
+    } else vals[i] = svCopy(v)
+}
+
+fun TestHost.scriptThisCall(name: string, args: array<SVal>): SVal = svString("called $name/${args.size}")
+fun TestHost.scriptAttrGet(name: string): SVal = svString("attr:$name")
+fun TestHost.scriptAttrSet(name: string, v: SVal): void {
+    out = out + "set $name\n"
+}
+fun TestHost.scriptMemberGet(obj: SVal, name: string): SVal = svUndef()
+fun TestHost.scriptMethodCall(obj: SVal, name: string, args: array<SVal>): SVal = svUndef()
+fun TestHost.scriptGlobal(name: string): SVal = svString("global:$name")
+fun TestHost.scriptPrint(text: string): void {
+    out = out + text
+}
+fun TestHost.scriptStringOf(v: SVal): string = "host"
+fun TestHost.scriptFail(message: string): void {
+    failures.append(message)
+}
+
+
+fun main: int {
+    val code = scriptCode()
+    val host = TestHost(Map(), [], "", [])
+    val members = code.parseStatements("this.i = 0; this.pred = function(v) { println(\"eval=\" + v.toString()); return v; };")
+    scriptRun(code, host, members)
+    val a = code.parseStatements("this.i += 1; print(\"i=\"); println(this.i); println(this.pred(this.i % 2 === 1) && true); println($text + 'x'); $v = 3 * (1 + 2);")
+    scriptRun(code, host, a)
+    scriptRun(code, host, a)
+    val p = code.parseExpression("this.i === 2 && !false")
+    println(host.out + "pred=${scriptTest(code, host, p)} errors=${code.errors.size} failures=${host.failures.size}")
+    0
+}

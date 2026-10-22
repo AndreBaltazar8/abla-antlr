@@ -7,6 +7,7 @@ import "configs.ab"
 import "lexer.ab"
 import "grammar.ab"
 import "intervalset.ab"
+import "script.ab"
 
 val excNone = 0
 val excNoViableAlt = 1
@@ -59,7 +60,22 @@ class Engine(
     var conflictCounter: int,
     var frameParent: array<int>,
     var frameParentState: array<int>,
-    var frameStart: array<int>
+    var frameStart: array<int>,
+    var memberNames: Map<string, int>,
+    var memberValues: array<SVal>,
+    var output: array<string>,
+    var failures: array<string>,
+    var ctxAttrNames: array<array<string>>,
+    var ctxAttrValues: array<array<SVal>>,
+    var evalCtx: int,
+    var matched: int,
+    var buildTrees: bool,
+    var bail: bool,
+    var bailed: bool,
+    var exactAmbig: bool,
+    var altNumbers: bool,
+    var listenerKind: string,
+    var diagnostics: bool
 ) {
     // CommonTokenStream over the default channel, filled from the lexer on demand
 
@@ -85,6 +101,8 @@ class Engine(
         val ty = lexer.out.type[k]
         tokens.add(ty, lexer.out.channel[k], lexer.out.start[k], lexer.out.stop[k], lexer.out.line[k], lexer.out.column[k], lexer.out.text[k], tokens.count())
         streamCount = tokens.count()
+        for (o in lexer.output) output.append(o)
+        lexer.output.clear()
         while (lexerErrorCount < lexer.errors.size) {
             val e = lexer.errors[lexerErrorCount]
             messages.append(SyntaxErr(e.line, e.column, e.message))
@@ -175,6 +193,8 @@ class Engine(
         ctxStop.append(-1)
         ctxAlt.append(0)
         ctxChildren.append([])
+        ctxAttrNames.append([])
+        ctxAttrValues.append([])
         id
     }
 
@@ -230,5 +250,6 @@ fun engine(lexer: Lexer, lexerAtn: Atn, dfas: array<Dfa>): Engine = Engine(
     false, -1, [], false,
     excNone, -1, -1, -1, -1, "",
     [], 0, -1, -1, 0,
-    [], [], []
+    [], [], [],
+    Map(), [], [], [], [], [], -1, -1, true, false, false, false, false, "", false
 )

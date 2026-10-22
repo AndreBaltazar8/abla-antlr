@@ -5,6 +5,8 @@ import "atn.ab"
 import "context.ab"
 import "semantic.ab"
 import "configs.ab"
+import "script.ab"
+import "host_lexer.ab"
 
 val lexerSkip = -3
 val lexerMore = -2
@@ -290,7 +292,13 @@ class Lexer(
     var tokenStartColumn: int,
     var tokenEmitted: bool,
     var out: Tokens,
-    var errors: array<LexError>
+    var errors: array<LexError>,
+    var memberNames: Map<string, int>,
+    var memberValues: array<SVal>,
+    var output: array<string>,
+    var failures: array<string>,
+    var positionAdjusting: bool,
+    var actionStop: int
 ) {
     fun la1(): int = if (index < input.units.size) input.units[index] else tokenEof
 
@@ -408,7 +416,7 @@ class Lexer(
             result = derive(atn, atn.transTarget[t], ctx, -1, c)
         } else if (k == trPredicate) {
             set.hasSemanticContext = true
-            result = derive(atn, atn.transTarget[t], ctxNull, -1, c)
+            if (!atn.script.enabled || evalLexerPredicate(atn, atn.transB[t], speculative)) result = derive(atn, atn.transTarget[t], ctxNull, -1, c)
         } else if (k == trAction) {
             val ctx = configs.ctx[c]
             if (ctx == ctxNull || contexts.hasEmptyPath(ctx)) {
@@ -509,11 +517,16 @@ class Lexer(
 
     fun execute(atn: Atn, executor: int): void {
         if (executor >= 0) {
+            val stop = index
             for (i in 0 until executors.len[executor]) {
                 val a = executors.flatAction[executors.start[executor] + i]
                 val k = atn.lexerActionType[a]
                 val d = atn.lexerActionA[a]
-                if (k == laChannel) tokenChannel = d
+                if (k == laCustom) {
+                    val offset = executors.flatOffset[executors.start[executor] + i]
+                    index = if (offset >= 0) startIndex + offset else stop
+                    if (atn.script.enabled) runLexerAction(atn, atn.lexerActionB[a])
+                } else if (k == laChannel) tokenChannel = d
                 else if (k == laSkip) tokenType = lexerSkip
                 else if (k == laMore) tokenType = lexerMore
                 else if (k == laType) tokenType = d
@@ -528,6 +541,7 @@ class Lexer(
                     }
                 }
             }
+            index = stop
         }
     }
 
@@ -623,6 +637,7 @@ class Lexer(
                     } else if (tokenType != lexerMore) inner = false
                 }
                 if (!skipped) {
+                    if (positionAdjusting) adjustAcceptPosition(atn)
                     emitToken(tokenType, tokenChannel, tokenStartIndex, index - 1, tokenStartLine, tokenStartColumn)
                     done = true
                 }

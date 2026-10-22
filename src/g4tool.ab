@@ -44,6 +44,7 @@ class G4Grammar(
     var maxChannel: int,
     var ruleNames: array<string>,
     var ruleAst: array<int>,
+    var ruleOrigAst: array<int>,
     var ruleMode: array<string>,
     var ruleFragment: array<bool>,
     var ruleLr: array<bool>,
@@ -189,7 +190,7 @@ fun g4Grammar(name: string, kind: int, root: int, sr: int): G4Grammar {
     tokenNames.set("EOF", -1)
     val typeToToken: array<string?> = [null]
     G4Grammar(name, kind, root, sr, -1, [], tokenNames, Map(), [], typeToToken, 0, Map(), [], 1,
-        [], [], [], [], [], Map(), [], [], 0, [], [])
+        [], [], [], [], [], [], Map(), [], [], 0, [], [])
 }
 
 class G4Tool(
@@ -667,6 +668,7 @@ fun G4Tool.addRule(gi: int, r: int, mode: string): void {
     grammars[gi].ruleIndex.set(name, grammars[gi].ruleNames.size)
     grammars[gi].ruleNames.append(name)
     grammars[gi].ruleAst.append(r)
+    grammars[gi].ruleOrigAst.append(r)
     grammars[gi].ruleMode.append(mode)
     grammars[gi].ruleFragment.append(fragment)
     grammars[gi].ruleLr.append(!isLexerRule && hasImmediateRecursion(r, name))
@@ -1024,6 +1026,11 @@ fun vocabLine(line: string): G4VocabEntry? {
     null
 }
 
+// What the tool writes (.interp text, the .tokens vocabulary) and the action
+// code the generated recognizers would contain, for the runtime's action
+// language: members, lexer actions and predicates by index, parser actions
+// by ATN state, rule @init/@after and declarations, and per-state labels,
+// element names and rule arguments (infoKind: g4atn.ab's infoLabel...).
 class G4Output(
     var lexerInterp: string,
     var parserInterp: string,
@@ -1033,7 +1040,68 @@ class G4Output(
     var parserPredicates: array<string>,
     var parserActionStates: array<int>,
     var parserActions: array<string>,
+    var lexerMembers: string,
+    var parserMembers: string,
+    var ruleInit: array<string>,
+    var ruleAfter: array<string>,
+    var ruleArgs: array<string>,
+    var ruleReturns: array<string>,
+    var ruleLocals: array<string>,
+    var ruleAltLabels: array<array<string>>,
+    var infoState: array<int>,
+    var infoKind: array<int>,
+    var infoText: array<string>,
     var error: string
 )
 
-fun g4Output(): G4Output = G4Output("", "", "", [], [], [], [], [], "")
+fun g4Output(): G4Output = G4Output("", "", "", [], [], [], [], [], "", "", [], [], [], [], [], [], [], [], [], "")
+
+// Grammar.defineAction: the grammar-level named action, last definition kept
+fun G4Tool.namedAction(gi: int, name: string): string {
+    val root = grammars[gi].root
+    val kind = grammars[gi].kind
+    val gtype = if (kind == gkLexer) "lexer" else if (kind == gkParser) "parser" else "combined"
+    var found = ""
+    for (c in ast.kids[root]) {
+        if (ast.type[c] == gtAt) {
+            if (ast.childCount(c) == 2) {
+                if (ast.text[ast.child(c, 0)] == name) found = ast.text[ast.child(c, 1)]
+            } else if (ast.childCount(c) == 3) {
+                val scope = ast.text[ast.child(c, 0)]
+                if ((scope == gtype || (scope == "parser" && gtype == "combined")) && ast.text[ast.child(c, 1)] == name) found = ast.text[ast.child(c, 2)]
+            }
+        }
+    }
+    found
+}
+
+// the # labels of a rule's outer alternatives, "" where there is none
+fun G4Tool.altLabels(r: int): array<string> {
+    val labels: array<string> = []
+    val blk = ast.firstChildWithType(r, gtBlock)
+    if (blk >= 0) {
+        for (alt in ast.kids[blk]) {
+            var a = alt
+            if (ast.type[a] == gtLexerAltAction) a = ast.child(a, 0)
+            labels.append(if (ast.altLabel[a] >= 0) ast.text[ast.altLabel[a]] else "")
+        }
+    }
+    labels
+}
+
+fun G4Tool.ruleAction(r: int, name: string): string {
+    var found = ""
+    for (c in ast.kids[r]) {
+        if (ast.type[c] == gtAt && ast.childCount(c) == 2 && ast.text[ast.child(c, 0)] == name) found = ast.text[ast.child(c, 1)]
+    }
+    found
+}
+
+fun G4Tool.ruleDecl(r: int, ty: int): string {
+    var found = ""
+    for (c in ast.kids[r]) {
+        if (ty == gtArgAction && ast.type[c] == gtArgAction) found = ast.text[c]
+        else if (ast.type[c] == ty && ast.childCount(c) > 0) found = ast.text[ast.child(c, 0)]
+    }
+    found
+}

@@ -1,0 +1,627 @@
+// The parser as the host of the action language: rule attributes ($x,
+// labels, $text, $ctx...), this._input, parse tree contexts and tokens as
+// values, and the hooks the interpreter calls around rules, actions,
+// predicates and matches, as in generated JavaScript parser code.
+
+import "abla/text"
+import "atn.ab"
+import "script.ab"
+import "lexer.ab"
+import "engine.ab"
+import "grammar.ab"
+import "intervalset.ab"
+import "configs.ab"
+import "interpret.ab"
+import "script_engine.ab"
+
+// rule context attributes: arguments, return values, locals, labels
+
+fun Engine.attrIndex(c: int, name: string): int {
+    var found = -1
+    if (c >= 0 && c < ctxAttrNames.size) {
+        for (i in 0 until ctxAttrNames[c].size) if (found < 0 && ctxAttrNames[c][i] == name) found = i
+    }
+    found
+}
+
+fun Engine.attrSet(c: int, name: string, v: SVal): void {
+    if (c < 0) return
+    val i = attrIndex(c, name)
+    if (i >= 0) ctxAttrValues[c][i] = svCopy(v)
+    else {
+        ctxAttrNames[c].append(name)
+        ctxAttrValues[c].append(svCopy(v))
+    }
+    return
+}
+
+fun Engine.attrAppend(c: int, name: string, v: SVal): void {
+    if (c < 0) return
+    val i = attrIndex(c, name)
+    if (i >= 0 && ctxAttrValues[c][i].kind == svList) {
+        val items = copyValues(ctxAttrValues[c][i].items)
+        items.append(svCopy(v))
+        ctxAttrValues[c][i] = SVal(svList, 0, "", items)
+    } else attrSet(c, name, SVal(svList, 0, "", [svCopy(v)]))
+    return
+}
+
+fun Engine.attrValue(c: int, name: string): SVal {
+    val i = attrIndex(c, name)
+    if (i >= 0) svCopy(ctxAttrValues[c][i]) else svNullValue()
+}
+
+fun Engine.tokenValue(t: int): SVal = if (t < 0) svNullValue() else svTokenRef(t)
+
+// BufferedTokenStream.getText from token start to token stop (it fills the stream)
+fun Engine.streamText(start: int, stop: int): string {
+    fill()
+    if (start < 0 || stop < 0) return ""
+    val a = tokIndex(start)
+    val b = tokIndex(stop)
+    if (a < 0 || b < 0) return ""
+    var e = b
+    if (e >= streamCount) e = streamCount - 1
+    val parts: array<string> = []
+    var i = a
+    var going = true
+    while (going && i <= e) {
+        if (tokens.type[i] == tokenEof) going = false
+        else {
+            parts.append(tokens.text[i])
+            i += 1
+        }
+    }
+    textJoin(parts, "")
+}
+
+fun Engine.tokenString(t: int): string {
+    val txt = tokText(t).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    val channel = if (tokChannel(t) > 0) ",channel=${tokChannel(t)}" else ""
+    "[@${tokIndex(t)},${tokStart(t)}:${tokStop(t)}='$txt',<${tokType(t)}>$channel,${tokLine(t)}:${tokColumn(t)}]"
+}
+
+// RuleContext.toString(): the invoking states up the context chain
+fun Engine.contextString(c: int): string {
+    val parts: array<string> = []
+    var p = c
+    while (p >= 0) {
+        if (ctxInvoking[p] != -1) parts.append("${ctxInvoking[p]}")
+        p = ctxParent[p]
+    }
+    "[" + textJoin(parts, " ") + "]"
+}
+
+fun treeEscape(s: string): string = s.replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+
+fun Engine.terminalText(t: int): string = if (tokType(t) == tokenEof) "<EOF>" else tokText(t)
+
+// Trees.toStringTree
+fun Engine.treeText(g: ParserGrammar, c: int): string {
+    var name = g.ruleNames[ctxRule[c]]
+    if (altNumbers && ctxAlt[c] != 0) name = name + ":${ctxAlt[c]}"
+    name = treeEscape(name)
+    if (ctxChildren[c].size == 0) return name
+    val parts: array<string> = ["(" + name]
+    for (child in ctxChildren[c]) {
+        if (child >= 0) parts.append(" " + treeText(g, child))
+        else parts.append(" " + treeEscape(terminalText((-1 - child) / 2)))
+    }
+    textJoin(parts, "") + ")"
+}
+
+// ParserRuleContext.getText: the children's text, without hidden tokens
+fun Engine.contextText(c: int): string {
+    val parts: array<string> = []
+    for (child in ctxChildren[c]) {
+        if (child >= 0) parts.append(contextText(child))
+        else {
+            val t = (-1 - child) / 2
+            parts.append(tokText(t))
+        }
+    }
+    textJoin(parts, "")
+}
+
+fun Engine.childRules(g: ParserGrammar, c: int, rule: int): array<int> {
+    val r: array<int> = []
+    for (child in ctxChildren[c]) if (child >= 0 && ctxRule[child] == rule) r.append(child)
+    r
+}
+
+fun Engine.childTokens(c: int, ttype: int): array<int> {
+    val r: array<int> = []
+    for (child in ctxChildren[c]) {
+        if (child < 0) {
+            val t = (-1 - child) / 2
+            if (tokType(t) == ttype && (-1 - child) % 2 == 0) r.append(t)
+        }
+    }
+    r
+}
+
+fun indexOfName(names: array<string>, n: string): int {
+    var found = -1
+    for (i in 0 until names.size) if (found < 0 && names[i] == n) found = i
+    found
+}
+
+fun tokenTypeOf(g: ParserGrammar, name: string): int {
+    var found = -1
+    for (i in 0 until g.symbolicNames.size) {
+        val s = g.symbolicNames[i]
+        if (found < 0 && s != null && s == name) found = i
+    }
+    found
+}
+
+fun svTerminal(t: int): SVal = svHostObject("terminal", t)
+
+// the host interface
+
+fun Engine.memberIndex(name: string): int {
+    val i = memberNames.get(name)
+    if (i == null) -1 else i
+}
+
+fun Engine.hostThisGet(aux: ParserGrammar, name: string): SVal {
+    if (name == "buildParseTrees") return svBoolean(buildTrees)
+    if (name == "_ctx") return if (cur >= 0) svCtxRef(cur) else svNullValue()
+    if (name == "_input") return svHostObject("input", 0)
+    if (name == "state") return svNumber(state)
+    if (name == "literalNames" || name == "symbolicNames" || name == "ruleNames") return svHostObject(name, 0)
+    val i = memberIndex(name)
+    if (i >= 0) return svCopy(memberValues[i])
+    svUndef()
+}
+
+fun Engine.hostThisSet(aux: ParserGrammar, name: string, v: SVal): void {
+    if (name == "buildParseTrees") buildTrees = svTruthy(v)
+    else {
+        val i = memberIndex(name)
+        if (i >= 0) memberValues[i] = svCopy(v)
+        else {
+            memberNames.set(name, memberValues.size)
+            memberValues.append(svCopy(v))
+        }
+    }
+    return
+}
+
+fun Engine.hostThisCall(aux: ParserGrammar, name: string, args: array<SVal>): SVal {
+    if (name == "dumpDFA") {
+        output.append(dfaDump(aux))
+        return svUndef()
+    }
+    if (name == "useBailErrorStrategy") {
+        bail = true
+        return svUndef()
+    }
+    if (name == "useExactAmbiguityDetection") {
+        exactAmbig = true
+        return svUndef()
+    }
+    if (name == "useAltNumbers") {
+        altNumbers = true
+        return svUndef()
+    }
+    if (name == "useListener") {
+        listenerKind = if (args.size > 0) args[0].s else ""
+        return svUndef()
+    }
+    if (name == "walkListener") {
+        if (args.size > 0 && args[0].kind == svCtx) walkListener(aux, args[0].n)
+        return svUndef()
+    }
+    if (name == "getExpectedTokens") {
+        val text = expectedTokens(aux).toTokenString(aux.literalNames, aux.symbolicNames)
+        return SVal(svHost, 0, "expected", [svString(text)])
+    }
+    if (name == "getRuleInvocationStack") {
+        val parts: array<string> = []
+        var p = cur
+        while (p >= 0) {
+            parts.append(aux.ruleNames[ctxRule[p]])
+            p = ctxParent[p]
+        }
+        return svString("[" + textJoin(parts, ", ") + "]")
+    }
+    if (name == "getCurrentToken") return tokenValue(lt(1))
+    if (name == "precpred" && args.size == 2) return svBoolean(precpred(svNumberOf(args[1])))
+    failures.append("no parser method $name")
+    svUndef()
+}
+
+fun Engine.hostAttrGet(aux: ParserGrammar, name: string): SVal {
+    if (name == "parser") return svHostObject("this", 0)
+    val c = evalCtx
+    if (c < 0) {
+        failures.append("\$$name outside a rule")
+        return svNullValue()
+    }
+    if (name == "ctx") return svCtxRef(c)
+    if (name == "start") return tokenValue(ctxStart[c])
+    if (name == "stop") return tokenValue(ctxStop[c])
+    if (name == "text") return svString(streamText(ctxStart[c], lt(-1)))
+    attrValue(c, name)
+}
+
+fun Engine.hostAttrSet(aux: ParserGrammar, name: string, v: SVal): void {
+    attrSet(evalCtx, name, v)
+}
+
+fun tokenMember(e: Engine, t: int, name: string): SVal {
+    if (name == "text") return svString(e.tokText(t))
+    if (name == "type") return svNumber(e.tokType(t))
+    if (name == "line") return svNumber(e.tokLine(t))
+    if (name == "column" || name == "pos" || name == "charPositionInLine") return svNumber(e.tokColumn(t))
+    if (name == "index" || name == "tokenIndex") return svNumber(e.tokIndex(t))
+    if (name == "channel") return svNumber(e.tokChannel(t))
+    if (name == "start") return svNumber(e.tokStart(t))
+    if (name == "stop") return svNumber(e.tokStop(t))
+    if (name == "int") return svNumber(svNumberOf(svString(e.tokText(t))))
+    if (name == "symbol") return svTokenRef(t)
+    svUndef()
+}
+
+fun Engine.hostMemberGet(aux: ParserGrammar, obj: SVal, name: string): SVal {
+    if (obj.kind == svToken) return tokenMember(this, obj.n, name)
+    if (obj.kind == svCtx) {
+        val c = obj.n
+        if (name == "start") return tokenValue(ctxStart[c])
+        if (name == "stop") return tokenValue(ctxStop[c])
+        if (name == "text") return svString(streamText(ctxStart[c], ctxStop[c]))
+        if (name == "ctx") return obj
+        if (name == "parentCtx") return if (ctxParent[c] >= 0) svCtxRef(ctxParent[c]) else svNullValue()
+        if (name == "invokingState") return svNumber(ctxInvoking[c])
+        if (name == "ruleIndex") return svNumber(ctxRule[c])
+        return attrValue(c, name)
+    }
+    if (obj.kind == svHost) {
+        if (obj.s == "terminal") {
+            if (name == "symbol") return svTokenRef(obj.n)
+            return tokenMember(this, obj.n, name)
+        }
+        if (obj.s == "input" && name == "index") return svNumber(index)
+        if (obj.s == "vocabulary") {
+            val t = tokenTypeOf(aux, name)
+            return if (t >= 0) svNumber(t) else svUndef()
+        }
+    }
+    svUndef()
+}
+
+fun Engine.ctxMethod(aux: ParserGrammar, c: int, name: string, args: array<SVal>): SVal {
+    if (name == "toStringTree") return svString(treeText(aux, c))
+    if (name == "getText") return svString(contextText(c))
+    if (name == "getChildCount") return svNumber(ctxChildren[c].size)
+    if (name == "getAltNumber") return svNumber(if (altNumbers) ctxAlt[c] else 0)
+    if (name == "getRuleIndex") return svNumber(ctxRule[c])
+    if (name == "getChild" && args.size == 1) {
+        val i = svNumberOf(args[0])
+        if (i < 0 || i >= ctxChildren[c].size) return svNullValue()
+        val child = ctxChildren[c][i]
+        return if (child >= 0) svCtxRef(child) else svTerminal((-1 - child) / 2)
+    }
+    if (name.size > 0 && name[0] == 61) {
+        attrSet(c, name.slice(1, name.size), if (args.size > 0) args[0] else svNullValue())
+        return svUndef()
+    }
+    val rule = indexOfName(aux.ruleNames, name)
+    if (rule >= 0) {
+        val list = childRules(aux, c, rule)
+        if (args.size == 0) {
+            if (aux.atn.script.ruleReturns.size > 0) {
+                val items: array<SVal> = []
+                for (x in list) items.append(svCtxRef(x))
+                // a getter without an index returns the list when the rule
+                // is referenced several times; once, the context
+                return if (list.size == 1) svCtxRef(list[0]) else SVal(svList, 0, "", items)
+            }
+        }
+        val i = if (args.size > 0) svNumberOf(args[0]) else 0
+        return if (i >= 0 && i < list.size) svCtxRef(list[i]) else svNullValue()
+    }
+    val ttype = tokenTypeOf(aux, name)
+    if (ttype >= 0) {
+        val list = childTokens(c, ttype)
+        if (args.size == 0) {
+            if (list.size == 1) return svTerminal(list[0])
+            val items: array<SVal> = []
+            for (x in list) items.append(svTerminal(x))
+            return if (list.size == 0) svNullValue() else SVal(svList, 0, "", items)
+        }
+        val i = svNumberOf(args[0])
+        return if (i >= 0 && i < list.size) svTerminal(list[i]) else svNullValue()
+    }
+    failures.append("no context method $name")
+    svUndef()
+}
+
+fun Engine.hostMethodCall(aux: ParserGrammar, obj: SVal, name: string, args: array<SVal>): SVal {
+    if (obj.kind == svCtx) return ctxMethod(aux, obj.n, name, args)
+    if (obj.kind == svToken) {
+        if (name == "toString") return svString(tokenString(obj.n))
+        if (name == "getText") return svString(tokText(obj.n))
+    }
+    if (obj.kind == svHost) {
+        if (obj.s == "terminal") {
+            if (name == "toString" || name == "getText") return svString(terminalText(obj.n))
+            if (name == "getSymbol") return svTokenRef(obj.n)
+        }
+        if (obj.s == "input") {
+            if (name == "getText") {
+                fill()
+                val parts: array<string> = []
+                for (i in 0 until streamCount) if (tokens.type[i] != tokenEof) parts.append(tokens.text[i])
+                return svString(textJoin(parts, ""))
+            }
+            if (name == "LT" && args.size == 1) return tokenValue(lt(svNumberOf(args[0])))
+            if (name == "LA" && args.size == 1) return svNumber(la(svNumberOf(args[0])))
+        }
+        if (obj.s == "expected" && name == "toString" && obj.items.size > 0) return svCopy(obj.items[0])
+    }
+    failures.append("no method $name")
+    svUndef()
+}
+
+fun Engine.hostGlobal(aux: ParserGrammar, name: string): SVal {
+    if (name.endsWith("Parser") || name.endsWith("Lexer") || name == "Parser") return svHostObject("vocabulary", 0)
+    failures.append("unknown name $name")
+    svUndef()
+}
+
+fun Engine.hostPrint(aux: ParserGrammar, text: string): void {
+    output.append(text)
+    return
+}
+
+fun Engine.hostStringOf(aux: ParserGrammar, v: SVal): string {
+    if (v.kind == svToken) return tokenString(v.n)
+    if (v.kind == svCtx) return contextString(v.n)
+    if (v.kind == svHost) {
+        if (v.s == "terminal") return terminalText(v.n)
+        if (v.s == "expected" && v.items.size > 0) return v.items[0].s
+    }
+    "[object]"
+}
+
+fun Engine.hostFail(aux: ParserGrammar, message: string): void {
+    failures.append(message)
+    return
+}
+
+// hooks the interpreter calls
+
+fun Engine.runParserMembers(g: ParserGrammar): void {
+    evalCtx = -1
+    scriptRun(g, g.atn.script.code, g.atn.script.members)
+}
+
+fun Engine.runAction(g: ParserGrammar, s: int): void {
+    val node = g.atn.script.actionAt.get(s)
+    if (node != null) {
+        evalCtx = cur
+        scriptRun(g, g.atn.script.code, node)
+    }
+    return
+}
+
+fun Engine.testPredicate(g: ParserGrammar, predIndex: int, ctx: int): bool {
+    if (predIndex < 0 || predIndex >= g.atn.script.predicates.size) return true
+    val saved = evalCtx
+    evalCtx = ctx
+    val ok = scriptTest(g, g.atn.script.code, g.atn.script.predicates[predIndex])
+    evalCtx = saved
+    ok
+}
+
+fun Engine.predicateText(g: ParserGrammar, predIndex: int): string =
+    if (predIndex >= 0 && predIndex < g.atn.script.predicateTexts.size) g.atn.script.predicateTexts[predIndex] else ""
+
+// the arguments of the rule invoked from state s, in the caller's context
+fun Engine.callArguments(g: ParserGrammar, s: int): array<SVal> {
+    val values: array<SVal> = []
+    val node = g.atn.script.callArgs.get(s)
+    if (node != null) {
+        evalCtx = cur
+        for (k in copyInts(g.atn.script.code.kids[node])) values.append(scriptValue(g, g.atn.script.code, k))
+    }
+    values
+}
+
+// the context constructor (arguments, return values and locals) and @init
+fun Engine.enterRuleScript(g: ParserGrammar, rule: int, c: int, args: array<SVal>, lr: bool, prec: int): void {
+    val t = g.atn.script
+    if (rule >= t.ruleArgs.size) return
+    evalCtx = c
+    for (i in 0 until t.ruleReturns[rule].size) {
+        val init = t.ruleReturnInits[rule][i]
+        attrSet(c, t.ruleReturns[rule][i], if (init >= 0) scriptValue(g, t.code, init) else svNullValue())
+    }
+    for (i in 0 until t.ruleLocals[rule].size) {
+        val init = t.ruleLocalInits[rule][i]
+        attrSet(c, t.ruleLocals[rule][i], if (init >= 0) scriptValue(g, t.code, init) else svNullValue())
+    }
+    for (i in 0 until t.ruleArgs[rule].size) {
+        val v = if (i < args.size) args[i] else svUndef()
+        attrSet(c, t.ruleArgs[rule][i], if (svTruthy(v)) v else svNullValue())
+    }
+    if (lr) attrSet(c, "_p", if (prec != 0) svNumber(prec) else svNullValue())
+    if (t.ruleInit[rule] >= 0) scriptRun(g, t.code, t.ruleInit[rule])
+    return
+}
+
+fun Engine.afterRuleScript(g: ParserGrammar, rule: int): void {
+    val t = g.atn.script
+    if (rule < t.ruleAfter.size && t.ruleAfter[rule] >= 0) {
+        evalCtx = cur
+        scriptRun(g, t.code, t.ruleAfter[rule])
+    }
+    return
+}
+
+// a recursion context copies what the generated code passes on: the
+// precedence and the arguments
+fun Engine.copyRecursionAttrs(g: ParserGrammar, from: int, to: int): void {
+    val t = g.atn.script
+    val rule = ctxRule[from]
+    if (rule < t.ruleReturns.size) {
+        for (i in 0 until t.ruleReturns[rule].size) attrSet(to, t.ruleReturns[rule][i], svNullValue())
+        for (i in 0 until t.ruleLocals[rule].size) attrSet(to, t.ruleLocals[rule][i], svNullValue())
+        for (i in 0 until t.ruleArgs[rule].size) attrSet(to, t.ruleArgs[rule][i], attrValue(from, t.ruleArgs[rule][i]))
+    }
+    attrSet(to, "_p", attrValue(from, "_p"))
+    return
+}
+
+// labels and element references after a match or a rule invocation at state s
+fun Engine.labelElement(g: ParserGrammar, s: int, v: SVal): void {
+    val t = g.atn.script
+    val label = t.labels.get(s)
+    if (label != null) {
+        if (t.listLabels.has(s)) attrAppend(cur, label, v) else attrSet(cur, label, v)
+    }
+    val element = t.elementNames.get(s)
+    if (element != null) attrSet(cur, element, v)
+    return
+}
+
+// the left operand of a left-recursive alternative, labeled in the new context
+fun Engine.labelRecursion(g: ParserGrammar, s: int, previous: int): void {
+    val t = g.atn.script
+    val label = t.labels.get(s)
+    if (label != null) {
+        if (t.listLabels.has(s)) attrAppend(cur, label, svCtxRef(previous)) else attrSet(cur, label, svCtxRef(previous))
+    }
+    return
+}
+
+// Parser.dumpDFA
+
+fun Engine.dfaStateString(g: ParserGrammar, d: int, s: int): string {
+    val st = dfas[d].states[s]
+    val a = if (st.isAccept) ":" else ""
+    val b = if (st.requiresFullContext) "^" else ""
+    if (!st.isAccept) return "${a}s$s$b"
+    if (st.predicates.size > 0) {
+        val parts: array<string> = []
+        var i = 0
+        while (i + 1 < st.predicates.size) {
+            parts.append("(" + semanticText(st.predicates[i]) + ", ${st.predicates[i + 1]})")
+            i += 2
+        }
+        return "${a}s$s$b=>" + textJoin(parts, ",")
+    }
+    "${a}s$s$b=>${st.prediction}"
+}
+
+fun Engine.semanticText(s: int): string {
+    val k = sems.kind[s]
+    if (k == skPredicate) return "{${sems.a[s]}:${sems.b[s]}}?"
+    if (k == skPrecedence) return "{${sems.a[s]}>=prec}?"
+    if (k == skAnd || k == skOr) {
+        val parts: array<string> = []
+        for (o in sems.operands(s)) parts.append(semanticText(o))
+        return textJoin(parts, if (k == skAnd) "&& " else "|| ")
+    }
+    "{-1:-1}?"
+}
+
+fun dfaEdgeLabel(g: ParserGrammar, j: int): string {
+    if (j == 0) return "EOF"
+    val t = j - 1
+    val lit = if (t < g.literalNames.size) g.literalNames[t] else null
+    if (lit != null) return lit
+    val sym = if (t < g.symbolicNames.size) g.symbolicNames[t] else null
+    if (sym != null) sym else "null"
+}
+
+fun Engine.dfaDump(g: ParserGrammar): string {
+    val parts: array<string> = []
+    var seenOne = false
+    for (d in 0 until dfas.size) {
+        if (dfas[d].states.size > 0) {
+            if (seenOne) parts.append("\n")
+            parts.append("Decision $d:\n")
+            for (s in 0 until dfas[d].states.size) {
+                val n = dfas[d].states[s].edges.size
+                for (j in 0 until n) {
+                    val to = dfas[d].states[s].edges[j]
+                    if (to >= 0) parts.append(dfaStateString(g, d, s) + "-" + dfaEdgeLabel(g, j) + "->" + dfaStateString(g, d, to) + "\n")
+                }
+            }
+            seenOne = true
+        }
+    }
+    textJoin(parts, "")
+}
+
+// The listeners of the runtime testsuite (BasicListener, TokenGetterListener,
+// RuleGetterListener, LRListener, LRWithLabelsListener), walked as
+// ParseTreeWalker walks them.
+
+fun Engine.listenerName(g: ParserGrammar, c: int): string {
+    val rule = ctxRule[c]
+    var name = "" + g.ruleNames[rule]
+    if (rule < g.atn.script.altLabels.size) {
+        val alt = ctxAlt[c]
+        if (alt >= 1 && alt <= g.atn.script.altLabels[rule].size && g.atn.script.altLabels[rule][alt - 1].size > 0) name = "" + g.atn.script.altLabels[rule][alt - 1]
+    }
+    name
+}
+
+fun Engine.startText(c: int): string = if (ctxStart[c] >= 0) tokText(ctxStart[c]) else "null"
+
+fun Engine.exitListener(g: ParserGrammar, c: int): void {
+    val name = listenerName(g, c)
+    val kids = ctxChildren[c].size
+    if (listenerKind == "tokenGetter" && name == "a") {
+        val ints = childTokens(c, tokenTypeOf(g, "INT"))
+        if (kids == 2) {
+            val all: array<string> = []
+            for (t in ints) all.append(terminalText(t))
+            output.append(tokText(ints[0]) + " " + tokText(ints[1]) + " [" + textJoin(all, ", ") + "]\n")
+        } else {
+            val ids = childTokens(c, tokenTypeOf(g, "ID"))
+            if (ids.size > 0) output.append(tokenString(ids[0]) + "\n")
+        }
+    } else if (listenerKind == "ruleGetter" && name == "a") {
+        val bs = childRules(g, c, indexOfName(g.ruleNames, "b"))
+        if (kids == 2) output.append(startText(bs[0]) + " " + startText(bs[1]) + " " + startText(bs[0]) + "\n")
+        else output.append(startText(bs[0]) + "\n")
+    } else if (listenerKind == "lr" && name == "e") {
+        val es = childRules(g, c, indexOfName(g.ruleNames, "e"))
+        if (kids == 3) output.append(startText(es[0]) + " " + startText(es[1]) + " " + startText(es[0]) + "\n")
+        else {
+            val ints = childTokens(c, tokenTypeOf(g, "INT"))
+            output.append(tokText(ints[0]) + "\n")
+        }
+    } else if (listenerKind == "lrWithLabels") {
+        if (name == "call") {
+            val es = childRules(g, c, indexOfName(g.ruleNames, "e"))
+            val lists = childRules(g, c, indexOfName(g.ruleNames, "eList"))
+            val list = if (lists.size > 0) contextString(lists[0]) else "null"
+            output.append(startText(es[0]) + " " + list + "\n")
+        } else if (name == "int") {
+            val ints = childTokens(c, tokenTypeOf(g, "INT"))
+            output.append(tokText(ints[0]) + "\n")
+        }
+    }
+    return
+}
+
+fun Engine.walk(g: ParserGrammar, c: int): void {
+    for (child in copyInts(ctxChildren[c])) {
+        if (child >= 0) walk(g, child)
+        else {
+            val code = -1 - child
+            if (code % 2 == 0 && listenerKind == "basic") output.append(terminalText(code / 2) + "\n")
+        }
+    }
+    exitListener(g, c)
+}
+
+fun Engine.walkListener(g: ParserGrammar, c: int): void {
+    walk(g, c)
+}

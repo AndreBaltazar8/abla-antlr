@@ -1,0 +1,160 @@
+// The lexer as the host of the action language: what this, $attributes and
+// this._input mean in lexer actions and predicates, as in a generated
+// JavaScript lexer.
+
+import "abla/text"
+import "atn.ab"
+import "script.ab"
+import "lexer.ab"
+import "script_lexer.ab"
+
+fun Lexer.currentText(): string = input.getText(tokenStartIndex, index - 1)
+
+fun Lexer.inputLa(k: int): int {
+    if (k == 0) return 0
+    val pos = if (k < 0) index + k else index + k - 1
+    if (pos < 0 || pos >= input.units.size) tokenEof else input.units[pos]
+}
+
+fun Lexer.memberIndex(name: string): int {
+    val i = memberNames.get(name)
+    if (i == null) -1 else i
+}
+
+fun Lexer.hostThisGet(aux: Atn, name: string): SVal {
+    if (name == "text") return svString(currentText())
+    if (name == "column") return svNumber(column)
+    if (name == "line") return svNumber(line)
+    if (name == "type" || name == "_type") return svNumber(tokenType)
+    if (name == "channel" || name == "_channel") return svNumber(tokenChannel)
+    if (name == "_tokenStartColumn") return svNumber(tokenStartColumn)
+    if (name == "_tokenStartLine") return svNumber(tokenStartLine)
+    if (name == "_tokenStartCharIndex") return svNumber(tokenStartIndex)
+    if (name == "_mode") return svNumber(mode)
+    if (name == "_input") return svHostObject("input", 0)
+    val i = memberIndex(name)
+    if (i >= 0) return svCopy(memberValues[i])
+    svUndef()
+}
+
+fun Lexer.hostThisSet(aux: Atn, name: string, v: SVal): void {
+    if (name == "type" || name == "_type") tokenType = svNumberOf(v)
+    else if (name == "channel" || name == "_channel") tokenChannel = svNumberOf(v)
+    else {
+        val i = memberIndex(name)
+        if (i >= 0) memberValues[i] = svCopy(v)
+        else {
+            memberNames.set(name, memberValues.size)
+            memberValues.append(svCopy(v))
+        }
+    }
+    return
+}
+
+fun Lexer.hostThisCall(aux: Atn, name: string, args: array<SVal>): SVal {
+    if (name == "usePositionAdjustingLexer") positionAdjusting = true
+    else if (name == "getText") return svString(currentText())
+    else if (name == "skip") tokenType = lexerSkip
+    else if (name == "more") tokenType = lexerMore
+    else failures.append("no lexer method $name")
+    svUndef()
+}
+
+fun Lexer.hostAttrGet(aux: Atn, name: string): SVal {
+    if (name == "text") return svString(currentText())
+    if (name == "type") return svNumber(tokenType)
+    if (name == "channel") return svNumber(tokenChannel)
+    if (name == "line") return svNumber(tokenStartLine)
+    if (name == "pos") return svNumber(tokenStartColumn)
+    if (name == "mode") return svNumber(mode)
+    failures.append("no lexer attribute \$$name")
+    svUndef()
+}
+
+fun Lexer.hostAttrSet(aux: Atn, name: string, v: SVal): void {
+    if (name == "type") tokenType = svNumberOf(v)
+    else if (name == "channel") tokenChannel = svNumberOf(v)
+    else failures.append("can't set \$$name")
+    return
+}
+
+fun Lexer.hostMemberGet(aux: Atn, obj: SVal, name: string): SVal {
+    if (obj.kind == svHost && obj.s == "input") {
+        if (name == "index") return svNumber(index)
+        if (name == "size") return svNumber(input.units.size)
+    }
+    svUndef()
+}
+
+fun Lexer.hostMethodCall(aux: Atn, obj: SVal, name: string, args: array<SVal>): SVal {
+    if (obj.kind == svHost && obj.s == "input") {
+        if (name == "LA" && args.size == 1) return svNumber(inputLa(svNumberOf(args[0])))
+        if (name == "getText") return svString(input.getText(0, input.units.size - 1))
+    }
+    failures.append("no method $name")
+    svUndef()
+}
+
+fun Lexer.hostGlobal(aux: Atn, name: string): SVal = svHostObject("vocabulary", 0)
+
+fun Lexer.hostPrint(aux: Atn, text: string): void {
+    output.append(text)
+    return
+}
+
+fun Lexer.hostStringOf(aux: Atn, v: SVal): string = "[object]"
+
+fun Lexer.hostFail(aux: Atn, message: string): void {
+    failures.append(message)
+    return
+}
+
+fun Lexer.runLexerMembers(atn: Atn): void {
+    scriptRun(atn, atn.script.code, atn.script.members)
+}
+
+fun Lexer.runLexerAction(atn: Atn, actionIndex: int): void {
+    if (actionIndex >= 0 && actionIndex < atn.script.lexerActions.size) scriptRun(atn, atn.script.code, atn.script.lexerActions[actionIndex])
+    return
+}
+
+// LexerATNSimulator.evaluatePredicate: a speculative evaluation sees the
+// input one character further on.
+fun Lexer.evalLexerPredicate(atn: Atn, predIndex: int, speculative: bool): bool {
+    if (predIndex < 0 || predIndex >= atn.script.predicates.size) return true
+    val node = atn.script.predicates[predIndex]
+    if (!speculative) return scriptTest(atn, atn.script.code, node)
+    val savedColumn = column
+    val savedLine = line
+    val savedIndex = index
+    if (index < input.units.size) consumeChar()
+    val result = scriptTest(atn, atn.script.code, node)
+    column = savedColumn
+    line = savedLine
+    index = savedIndex
+    result
+}
+
+fun Lexer.resetAcceptPosition(at: int, ln: int, col: int): void {
+    index = at
+    line = ln
+    column = col
+    consumeChar()
+}
+
+fun isIdentifierUnit(c: int): bool = (c >= 48 && c <= 57) || (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95
+
+// The PositionAdjustingLexer of the runtime testsuite: a TOKENS or LABEL
+// token ends after its keyword or identifier.
+fun Lexer.adjustAcceptPosition(atn: Atn): void {
+    val tokensType = atn.script.tokenTypes.get("TOKENS")
+    val labelType = atn.script.tokenTypes.get("LABEL")
+    if (tokensType != null && tokenType == tokensType) {
+        if (index > tokenStartIndex + 6) resetAcceptPosition(tokenStartIndex + 5, tokenStartLine, tokenStartColumn + 5)
+    } else if (labelType != null && tokenType == labelType) {
+        var n = 0
+        while (tokenStartIndex + n < index && isIdentifierUnit(input.units[tokenStartIndex + n])) n += 1
+        if (index > tokenStartIndex + n) resetAcceptPosition(tokenStartIndex + n - 1, tokenStartLine, tokenStartColumn + n - 1)
+    }
+    return
+}

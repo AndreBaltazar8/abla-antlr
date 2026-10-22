@@ -14,6 +14,12 @@ import "g4tool.ab"
 
 class H(val l: int, val r: int)
 
+// per-state facts the parser's action code needs
+val infoLabel = 1
+val infoListLabel = 2
+val infoElement = 3
+val infoCallArgs = 4
+
 class G4Atn(
     val lexer: bool,
     val maxTokenType: int,
@@ -44,8 +50,17 @@ class G4Atn(
     var predIndex: Map<int, int>,
     var actionIndex: Map<int, int>,
     var actionStates: array<int>,
-    var actionNodes: array<int>
+    var actionNodes: array<int>,
+    var infoState: array<int>,
+    var infoKind: array<int>,
+    var infoText: array<string>
 ) {
+    fun info(s: int, kind: int, text: string): void {
+        infoState.append(s)
+        infoKind.append(kind)
+        infoText.append(text)
+    }
+
     fun newState(kind: int, rule: int): int {
         val s = stype.size
         stype.append(kind)
@@ -349,7 +364,7 @@ fun sameSet(a: IntervalSet, b: IntervalSet): bool {
 
 fun g4Atn(lexer: bool, maxTokenType: int): G4Atn =
     G4Atn(lexer, maxTokenType, [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], -1,
-        Map(), Map(), [], [])
+        Map(), Map(), [], [], [], [], [])
 
 fun G4Tool.atnTokenType(gi: int, text: string): int = grammars[gi].getTokenType(text)
 
@@ -367,6 +382,11 @@ fun G4Tool.fRuleRef(gi: int, var atn: G4Atn, n: int): H {
     val p = ast.optionString(n, "p")
     if (p != null) prec = parseDecimal(p)
     atn.add(left, trRule, start, r, prec, 0, right, null)
+    if (!atn.lexer) {
+        atn.info(left, infoElement, ast.text[n])
+        val arg = ast.firstChildWithType(n, gtArgAction)
+        if (arg >= 0) atn.info(left, infoCallArgs, ast.text[arg])
+    }
     H(left, right)
 }
 
@@ -389,6 +409,7 @@ fun G4Tool.fTokenRef(gi: int, var atn: G4Atn, n: int): H {
     val l = atn.basic()
     val r = atn.basic()
     atn.add(l, trAtom, r, atnTokenType(gi, ast.text[n]), 0, 0, -1, null)
+    if (ast.type[n] == gtTokenRef) atn.info(l, infoElement, ast.text[n])
     H(l, r)
 }
 
@@ -650,7 +671,11 @@ fun G4Tool.fAlternative(gi: int, var atn: G4Atn, n: int): H {
 
 fun G4Tool.fElement(gi: int, var atn: G4Atn, n: int): H {
     val t = ast.type[n]
-    if (t == gtAssign || t == gtPlusAssign) return fElement(gi, atn, ast.child(n, 1))
+    if (t == gtAssign || t == gtPlusAssign) {
+        val h = fElement(gi, atn, ast.child(n, 1))
+        atn.info(h.l, if (t == gtAssign) infoLabel else infoListLabel, ast.text[ast.child(n, 0)])
+        return h
+    }
     if (t == gtRange) return fRange(gi, atn, n)
     if (t == gtWildcard) {
         val l = atn.basic()

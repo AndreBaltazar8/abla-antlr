@@ -26,6 +26,7 @@ val opLl1Plus = 14
 val opPlus = 15
 val opStopToken = 16
 val opLrPush = 17
+val opAction = 18
 
 // op flags
 val flagOuter = 1
@@ -214,6 +215,9 @@ fun ProgramBuilder.buildSeq(var prog: Program, from: int, stop: int): int {
             } else if (tk == trPredicate) {
                 ops.append(prog.op(opSempred, s, atn.transA[t], atn.transB[t]))
                 s = atn.transTarget[t]
+            } else if (tk == trAction) {
+                ops.append(prog.op(opAction, s, 0, 0))
+                s = atn.transTarget[t]
             } else s = atn.transTarget[t]
         }
     }
@@ -277,7 +281,8 @@ fun ProgramBuilder.buildLeftRecursive(var prog: Program, rule: int, entry: int):
         for (n in primaryNumbers) prog.altNumbers[primaryOp].append(n)
     }
     for (i in 0 until opSeqs.size) {
-        val push = prog.op(opLrPush, -1, opNumbers[i], 0)
+        val firstState = if (prog.seqs[opSeqs[i]].size > 0) prog.state[prog.seqs[opSeqs[i]][0]] else -1
+        val push = prog.op(opLrPush, firstState, opNumbers[i], 0)
         val withPush: array<int> = [push]
         for (o in prog.seqs[opSeqs[i]]) withPush.append(o)
         prog.seqs[opSeqs[i]].clear()

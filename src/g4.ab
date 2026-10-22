@@ -69,12 +69,33 @@ fun G4Tool.processNonCombined(gi: int, var out: G4Output): string {
     for (n in grammars[gi].sempreds) {
         if (lexer) out.lexerPredicates.append(ast.text[n]) else out.parserPredicates.append(ast.text[n])
     }
+    val num: array<int> = []
+    var count = 0
+    for (st in 0 until atn.stype.size) {
+        num.append(count)
+        if (!atn.removed[st]) count += 1
+    }
     if (lexer) {
         for (n in grammars[gi].lexerActions) out.lexerActions.append(ast.text[n])
+        out.lexerMembers = namedAction(gi, "members")
     } else {
         for (i in 0 until atn.actionStates.size) {
-            out.parserActionStates.append(atn.stateNumber(atn.actionStates[i]))
+            out.parserActionStates.append(num[atn.actionStates[i]])
             out.parserActions.append(ast.text[atn.actionNodes[i]])
+        }
+        out.parserMembers = namedAction(gi, "members")
+        for (r in copyInts(grammars[gi].ruleOrigAst)) {
+            out.ruleInit.append(ruleAction(r, "init"))
+            out.ruleAfter.append(ruleAction(r, "after"))
+            out.ruleArgs.append(ruleDecl(r, gtArgAction))
+            out.ruleReturns.append(ruleDecl(r, gtReturns))
+            out.ruleLocals.append(ruleDecl(r, gtLocals))
+            out.ruleAltLabels.append(altLabels(r))
+        }
+        for (i in 0 until atn.infoState.size) {
+            out.infoState.append(num[atn.infoState[i]])
+            out.infoKind.append(atn.infoKind[i])
+            out.infoText.append(atn.infoText[i])
         }
     }
     interpText(gi, atn)

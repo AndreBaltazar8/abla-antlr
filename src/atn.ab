@@ -3,6 +3,7 @@
 
 import "abla/text"
 import "intervalset.ab"
+import "script.ab"
 
 val atnLexer = 0
 val atnParser = 1
@@ -76,7 +77,8 @@ class Atn(
     val lexerActionA: array<int>,
     val lexerActionB: array<int>,
     val lexerActionCanon: array<int>,
-    val error: string
+    val error: string,
+    var script: ScriptTables
 ) {
     fun stateCount(): int = stateType.size
 
@@ -219,7 +221,7 @@ fun readSets(var r: AtnReader, var sets: array<IntervalSet>, wide: bool): void {
 
 // raw holds the serialized values (the integers between the brackets of an
 // .interp file's atn section, or the char codes of a generated parser's string).
-fun failedAtn(message: string): Atn = Atn(-1, 0, [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], message)
+fun failedAtn(message: string): Atn = Atn(-1, 0, [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], message, scriptTables())
 
 fun deserializeAtn(raw: array<int>): Atn {
     if (raw.size < 12) return failedAtn("no serialized ATN")
@@ -408,7 +410,7 @@ fun deserializeAtn(raw: array<int>): Atn {
         b.endState, b.startState, b.loopBackState, b.stopState, b.precedenceRule, b.precedenceDecision,
         b.transType, b.transTarget, b.transA, b.transB, b.transFollow, b.transFlag, b.transReturn, b.transLabel,
         ruleToStart, ruleToStop, ruleToTokenType, modeToStart, decisionToState,
-        lexerActionType, lexerActionA, lexerActionB, lexerActionCanon, ""
+        lexerActionType, lexerActionA, lexerActionB, lexerActionCanon, "", scriptTables()
     )
     atn
 }

@@ -1,0 +1,65 @@
+import "abla/io"
+import "abla/fs"
+import "abla/process"
+import "../src/lexer.ab"
+import "../src/g4lexer.ab"
+import "../src/g4ast.ab"
+import "../src/g4parser.ab"
+
+fun sortedKeys(keys: array<string>): array<string> {
+    val r: array<string> = []
+    for (k in keys) {
+        r.append(k)
+        var i = r.size - 1
+        while (i > 0 && r[i - 1] > r[i]) {
+            val t = r[i - 1]
+            r[i - 1] = r[i]
+            r[i] = t
+            i -= 1
+        }
+    }
+    r
+}
+
+fun dump(ast: G4Ast, n: int, var out: array<string>): void {
+    val hasKids = ast.kids[n].size > 0
+    if (hasKids) out.append("(")
+    out.append("${ast.text[n]}@${ast.tok[n]}:${ast.startIndex(n)}-${ast.stopIndex(n)}")
+    if (ast.withOptions[n] && ast.optKeys[n].size > 0) {
+        out.append("{")
+        var first = true
+        for (k in sortedKeys(ast.optKeys[n])) {
+            if (!first) out.append(",")
+            first = false
+            val v = ast.optionNode(n, k)
+            out.append("$k=" + (if (v < 0) "" else ast.text[v]))
+        }
+        out.append("}")
+    }
+    if (ast.type[n] == gtAlt && ast.altLabel[n] >= 0) out.append("#" + ast.text[ast.altLabel[n]])
+    if ((ast.type[n] == gtOptional || ast.type[n] == gtClosure || ast.type[n] == gtPositiveClosure) && !ast.greedy[n]) out.append("??")
+    for (c in ast.kids[n]) {
+        out.append(" ")
+        dump(ast, c, out)
+    }
+    if (hasKids) out.append(")")
+}
+
+fun main: int {
+    var i = 0
+    while (i < processArgumentCount()) {
+        val text = path(processArgument(i)).readText()
+        val ast = g4Ast()
+        val sr = ast.addStream(g4Lex(sourceText(text)))
+        val errors: array<string> = []
+        val root = g4Parse(ast, sr, errors)
+        if (root < 0) println("error: ${errors[0]}")
+        else {
+            val out: array<string> = []
+            dump(ast, root, out)
+            println(textJoin(out, ""))
+        }
+        i += 1
+    }
+    0
+}

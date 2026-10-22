@@ -1,0 +1,412 @@
+// The lexer for .g4 grammar files: ANTLRLexer.g of the ANTLR 4.9 tool, over
+// UTF-16 code units as Java reads the file.
+
+import "abla/text"
+import "lexer.ab"
+
+val gtEof = -1
+val gtComment = 1
+val gtDocComment = 2
+val gtArgAction = 3
+val gtLexerCharSet = 4
+val gtAction = 5
+val gtSempred = 6
+val gtOptions = 7
+val gtTokensSpec = 8
+val gtChannels = 9
+val gtImport = 10
+val gtFragment = 11
+val gtLexer = 12
+val gtParser = 13
+val gtGrammar = 14
+val gtTreeGrammar = 15
+val gtProtected = 16
+val gtPublic = 17
+val gtPrivate = 18
+val gtReturns = 19
+val gtLocals = 20
+val gtThrows = 21
+val gtCatch = 22
+val gtFinally = 23
+val gtMode = 24
+val gtColon = 25
+val gtColonColon = 26
+val gtComma = 27
+val gtSemi = 28
+val gtLParen = 29
+val gtRParen = 30
+val gtRArrow = 31
+val gtLt = 32
+val gtGt = 33
+val gtAssign = 34
+val gtQuestion = 35
+val gtSynpred = 36
+val gtStar = 37
+val gtPlus = 38
+val gtPlusAssign = 39
+val gtOr = 40
+val gtDollar = 41
+val gtDot = 42
+val gtRange = 43
+val gtAt = 44
+val gtPound = 45
+val gtNot = 46
+val gtRBrace = 47
+val gtTokenRef = 48
+val gtRuleRef = 49
+val gtInt = 50
+val gtStringLiteral = 51
+val gtWs = 52
+
+// AST-only node types
+val gtRule = 60
+val gtRules = 61
+val gtRuleModifiers = 62
+val gtBlock = 63
+val gtOptional = 64
+val gtClosure = 65
+val gtPositiveClosure = 66
+val gtSet = 67
+val gtEpsilon = 68
+val gtAlt = 69
+val gtId = 70
+val gtWildcard = 71
+val gtElementOptions = 72
+val gtLexerAltAction = 73
+val gtLexerActionCall = 74
+val gtRangeNode = 75
+
+val g4Hidden = 99
+val g4CommentsChannel = 2
+
+class G4Tokens(
+    var type: array<int>,
+    var channel: array<int>,
+    var start: array<int>,
+    var stop: array<int>,
+    var text: array<string>
+) {
+    fun count(): int = type.size
+
+    fun add(ty: int, ch: int, st: int, sp: int, tx: string): void {
+        type.append(ty)
+        channel.append(ch)
+        start.append(st)
+        stop.append(sp)
+        text.append(tx)
+    }
+}
+
+fun g4Tokens(): G4Tokens = G4Tokens([], [], [], [], [])
+
+fun isNameStart(c: int): bool =
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+    (c >= 192 && c <= 214) || (c >= 216 && c <= 246) || (c >= 248 && c <= 767) ||
+    (c >= 880 && c <= 893) || (c >= 895 && c <= 8191) || (c >= 8204 && c <= 8205) ||
+    (c >= 8304 && c <= 8591) || (c >= 11264 && c <= 12271) || (c >= 12289 && c <= 55295) ||
+    (c >= 63744 && c <= 64975) || (c >= 65008 && c <= 65278) || (c >= 65280 && c <= 65533)
+
+fun isNameChar(c: int): bool =
+    isNameStart(c) || (c >= 48 && c <= 57) || c == 95 || c == 183 ||
+    (c >= 768 && c <= 879) || (c >= 8255 && c <= 8256)
+
+fun isHexDigit(c: int): bool = (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+
+fun isWsNl(c: int): bool = c == 32 || c == 9 || c == 12 || c == 10 || c == 13
+
+// Character.isUpperCase for the characters an ID can start with.
+fun isUpperStart(c: int): bool =
+    (c >= 65 && c <= 90) || (c >= 192 && c <= 214) || (c >= 216 && c <= 222) ||
+    (c >= 913 && c <= 937 && c != 930) || (c >= 1024 && c <= 1071)
+
+class G4Lexer(val units: array<int>, var p: int, var isLexerRule: bool) {
+    fun la(k: int): int = if (p + k - 1 < units.size) units[p + k - 1] else -1
+
+    fun matchesWord(word: string, at: int): bool {
+        var ok = at + word.size <= units.size
+        var i = 0
+        while (ok && i < word.size) {
+            if (units[at + i] != word[i]) ok = false
+            i += 1
+        }
+        ok
+    }
+
+    fun skipWsNl(from: int): int {
+        var q = from
+        while (q < units.size && isWsNl(units[q])) q += 1
+        q
+    }
+
+    fun escape(): void {
+        p += 1
+        if (la(1) == 117) {
+            if (la(2) == 123) {
+                p += 2
+                while (isHexDigit(la(1))) p += 1
+                if (la(1) == 125) p += 1
+            } else {
+                p += 1
+                var n = 0
+                while (n < 4 && isHexDigit(la(1))) {
+                    p += 1
+                    n += 1
+                }
+            }
+        } else if (la(1) != -1) p += 1
+    }
+
+    fun actionEsc(): void {
+        p += 1
+        if (la(1) != -1) p += 1
+    }
+
+    fun actionCharLiteral(): void {
+        p += 1
+        while (la(1) != -1 && la(1) != 39) {
+            if (la(1) == 92) actionEsc() else p += 1
+        }
+        if (la(1) == 39) p += 1
+    }
+
+    fun actionStringLiteral(): void {
+        p += 1
+        while (la(1) != -1 && la(1) != 34) {
+            if (la(1) == 92) actionEsc() else p += 1
+        }
+        if (la(1) == 34) p += 1
+    }
+
+    // COMMENT after its '/': returns true for a doc comment
+    fun comment(): bool {
+        var doc = false
+        p += 1
+        if (la(1) == 47) {
+            p += 1
+            while (la(1) != -1 && la(1) != 10 && la(1) != 13) p += 1
+        } else if (la(1) == 42) {
+            p += 1
+            if (la(1) == 42 && la(2) != 47) {
+                p += 1
+                doc = true
+            }
+            while (la(1) != -1 && !(la(1) == 42 && la(2) == 47)) p += 1
+            if (la(1) == 42) p += 2
+        }
+        doc
+    }
+
+    fun nestedAction(): void {
+        p += 1
+        var done = false
+        while (!done) {
+            val c = la(1)
+            if (c == -1) done = true
+            else if (c == 125) {
+                p += 1
+                done = true
+            } else if (c == 123) nestedAction()
+            else if (c == 39) actionCharLiteral()
+            else if (c == 34) actionStringLiteral()
+            else if (c == 47) comment()
+            else if (c == 92) actionEsc()
+            else p += 1
+        }
+    }
+
+    fun argAction(): void {
+        p += 1
+        var done = false
+        while (!done) {
+            val c = la(1)
+            if (c == -1) done = true
+            else if (c == 93) {
+                p += 1
+                done = true
+            } else if (c == 91) argAction()
+            else if (c == 34) actionStringLiteral()
+            else if (c == 39) actionCharLiteral()
+            else p += 1
+        }
+    }
+
+    fun lexerCharSet(): void {
+        p += 1
+        var done = false
+        while (!done) {
+            val c = la(1)
+            if (c == -1 || c == 10 || c == 13) done = true
+            else if (c == 93) {
+                p += 1
+                done = true
+            } else if (c == 92) {
+                if (la(2) == -1 || la(2) == 10 || la(2) == 13) {
+                    p += 1
+                    done = true
+                } else p += 2
+            } else p += 1
+        }
+    }
+}
+
+fun keywordType(word: string): int =
+    if (word == "import") gtImport
+    else if (word == "fragment") gtFragment
+    else if (word == "lexer") gtLexer
+    else if (word == "parser") gtParser
+    else if (word == "grammar") gtGrammar
+    else if (word == "protected") gtProtected
+    else if (word == "public") gtPublic
+    else if (word == "private") gtPrivate
+    else if (word == "returns") gtReturns
+    else if (word == "locals") gtLocals
+    else if (word == "throws") gtThrows
+    else if (word == "catch") gtCatch
+    else if (word == "finally") gtFinally
+    else if (word == "mode") gtMode
+    else 0
+
+// getRuleOrSubruleStartToken: the nearest '(' or rule name before index i.
+fun ruleOrSubruleStart(toks: G4Tokens): int {
+    var i = toks.count() - 1
+    var found = -1
+    while (found < 0 && i >= 0) {
+        val t = toks.type[i]
+        if (t == gtLParen || t == gtTokenRef || t == gtRuleRef) found = t
+        i -= 1
+    }
+    found
+}
+
+fun g4Lex(src: SourceText): G4Tokens {
+    val toks = g4Tokens()
+    val lx = G4Lexer(src.units, 0, false)
+    while (lx.p < src.units.size) {
+        val start = lx.p
+        val c = lx.la(1)
+        var type = 0
+        var channel = 0
+        var textStart = start
+        var textEnd = -1
+        var skip = false
+        if (c == 47) {
+            type = if (lx.comment()) gtDocComment else gtComment
+            channel = g4CommentsChannel
+        } else if (c == 91) {
+            if (lx.isLexerRule) {
+                lx.lexerCharSet()
+                type = gtLexerCharSet
+            } else {
+                lx.argAction()
+                type = gtArgAction
+                textStart = start + 1
+                textEnd = lx.p - 2
+            }
+        } else if (c == 123) {
+            lx.nestedAction()
+            type = gtAction
+            if (lx.la(1) == 63) {
+                lx.p += 1
+                type = gtSempred
+                val q = lx.skipWsNl(lx.p)
+                if (q + 1 < src.units.size && src.units[q] == 61 && src.units[q + 1] == 62) lx.p = q + 2
+            }
+        } else if (isNameStart(c)) {
+            var q = lx.p
+            while (q < src.units.size && isNameChar(src.units[q])) q += 1
+            val word = src.getText(start, q - 1)
+            if (word == "options" || word == "tokens" || word == "channels") {
+                val b = lx.skipWsNl(q)
+                if (b < src.units.size && src.units[b] == 123) {
+                    q = b + 1
+                    type = if (word == "options") gtOptions else if (word == "tokens") gtTokensSpec else gtChannels
+                }
+            } else if (word == "tree") {
+                val b = lx.skipWsNl(q)
+                if (lx.matchesWord("grammar", b) && !(b + 7 < src.units.size && isNameChar(src.units[b + 7]))) {
+                    q = b + 7
+                    type = gtTreeGrammar
+                }
+            }
+            if (type == 0) type = keywordType(word)
+            if (type == 0) type = if (isUpperStart(c)) gtTokenRef else gtRuleRef
+            lx.p = q
+        } else if (c >= 48 && c <= 57) {
+            while (lx.la(1) >= 48 && lx.la(1) <= 57) lx.p += 1
+            type = gtInt
+        } else if (c == 39) {
+            lx.p += 1
+            var done = false
+            while (!done) {
+                val d = lx.la(1)
+                if (d == -1 || d == 10 || d == 13) done = true
+                else if (d == 39) {
+                    lx.p += 1
+                    done = true
+                } else if (d == 92) lx.escape()
+                else lx.p += 1
+            }
+            type = gtStringLiteral
+        } else if (c == 32 || c == 9 || c == 13 || c == 10 || c == 12) {
+            while (isWsNl(lx.la(1))) lx.p += 1
+            type = gtWs
+            channel = g4Hidden
+        } else if (c == 65279) {
+            lx.p += 1
+            skip = true
+        } else {
+            val d = lx.la(2)
+            lx.p += 1
+            if (c == 58) {
+                if (d == 58) {
+                    lx.p += 1
+                    type = gtColonColon
+                } else {
+                    type = gtColon
+                    val t = ruleOrSubruleStart(toks)
+                    if (t == gtRuleRef) lx.isLexerRule = false
+                    else if (t == gtTokenRef) lx.isLexerRule = true
+                }
+            } else if (c == 44) type = gtComma
+            else if (c == 59) type = gtSemi
+            else if (c == 40) type = gtLParen
+            else if (c == 41) type = gtRParen
+            else if (c == 45 && d == 62) {
+                lx.p += 1
+                type = gtRArrow
+            } else if (c == 60) type = gtLt
+            else if (c == 62) type = gtGt
+            else if (c == 61) {
+                if (d == 62) {
+                    lx.p += 1
+                    type = gtSynpred
+                    channel = g4Hidden
+                } else type = gtAssign
+            } else if (c == 63) type = gtQuestion
+            else if (c == 42) type = gtStar
+            else if (c == 43) {
+                if (d == 61) {
+                    lx.p += 1
+                    type = gtPlusAssign
+                } else type = gtPlus
+            } else if (c == 124) type = gtOr
+            else if (c == 36) type = gtDollar
+            else if (c == 46) {
+                if (d == 46) {
+                    lx.p += 1
+                    type = gtRange
+                } else type = gtDot
+            } else if (c == 64) type = gtAt
+            else if (c == 35) type = gtPound
+            else if (c == 126) type = gtNot
+            else if (c == 125) type = gtRBrace
+            else skip = true
+        }
+        if (!skip) {
+            val e = if (textStart != start) textEnd else lx.p - 1
+            toks.add(type, channel, start, lx.p - 1, src.getText(textStart, e))
+        }
+    }
+    toks.add(gtEof, 0, src.units.size, src.units.size - 1, "<EOF>")
+    toks
+}

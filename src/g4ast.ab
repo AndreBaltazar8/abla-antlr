@@ -1,0 +1,228 @@
+// Grammar ASTs in one arena, shaped as the ANTLR tool's GrammarAST trees: node
+// types, token indexes and token boundaries follow the tool's parser.
+
+import "g4lexer.ab"
+import "lexer.ab"
+
+class G4Ast(
+    var type: array<int>,
+    var text: array<string>,
+    var tok: array<int>,
+    var src: array<int>,
+    var start: array<int>,
+    var stop: array<int>,
+    var kids: array<array<int>>,
+    var parent: array<int>,
+    var optKeys: array<array<string>>,
+    var optVals: array<array<int>>,
+    var withOptions: array<bool>,
+    var altLabel: array<int>,
+    var greedy: array<bool>,
+    var streams: array<G4Tokens>,
+    var pSr: int,
+    var pPos: int,
+    var pLast: int,
+    var pError: string
+) {
+    fun node(ty: int, tx: string, tk: int, sr: int): int {
+        val id = type.size
+        type.append(ty)
+        text.append(tx)
+        tok.append(tk)
+        src.append(sr)
+        start.append(-1)
+        stop.append(-1)
+        kids.append([])
+        parent.append(-1)
+        optKeys.append([])
+        optVals.append([])
+        withOptions.append(false)
+        altLabel.append(-1)
+        greedy.append(true)
+        id
+    }
+
+    // A node for token tk of stream sr, typed as the token.
+    fun tokenNode(sr: int, tk: int): int = node(streams[sr].type[tk], streams[sr].text[tk], tk, sr)
+
+    fun startIndex(n: int): int = if (start[n] == -1) tok[n] else start[n]
+
+    fun stopIndex(n: int): int = if (stop[n] == -1) tok[n] else stop[n]
+
+    fun setBounds(n: int, a: int, b: int): void {
+        start[n] = a
+        stop[n] = b
+    }
+
+    fun childCount(n: int): int = kids[n].size
+
+    fun child(n: int, i: int): int = if (i < kids[n].size) kids[n][i] else -1
+
+    fun addChild(p: int, c: int): void {
+        kids[p].append(c)
+        parent[c] = p
+    }
+
+    fun insertChild(p: int, i: int, c: int): void {
+        kids[p].append(c)
+        var j = kids[p].size - 1
+        while (j > i) {
+            kids[p][j] = kids[p][j - 1]
+            j -= 1
+        }
+        kids[p][i] = c
+        parent[c] = p
+    }
+
+    fun setChild(p: int, i: int, c: int): void {
+        kids[p][i] = c
+        parent[c] = p
+    }
+
+    fun deleteChild(p: int, i: int): void {
+        var j = i
+        while (j + 1 < kids[p].size) {
+            kids[p][j] = kids[p][j + 1]
+            j += 1
+        }
+        kids[p].truncate(kids[p].size - 1)
+    }
+
+    fun deleteChildNode(p: int, c: int): void {
+        var at = -1
+        for (i in 0 until kids[p].size) if (at < 0 && kids[p][i] == c) at = i
+        if (at >= 0) deleteChild(p, at)
+    }
+
+    fun childIndex(c: int): int {
+        val p = parent[c]
+        var at = -1
+        if (p >= 0) for (i in 0 until kids[p].size) if (at < 0 && kids[p][i] == c) at = i
+        at
+    }
+
+    fun setOption(n: int, key: string, value: int): void {
+        var at = -1
+        for (i in 0 until optKeys[n].size) if (optKeys[n][i] == key) at = i
+        if (at >= 0) optVals[n][at] = value
+        else {
+            optKeys[n].append(key)
+            optVals[n].append(value)
+        }
+    }
+
+    fun optionNode(n: int, key: string): int {
+        var v = -1
+        for (i in 0 until optKeys[n].size) if (optKeys[n][i] == key) v = optVals[n][i]
+        v
+    }
+
+    fun hasOption(n: int, key: string): bool {
+        var found = false
+        for (k in optKeys[n]) if (k == key) found = true
+        found
+    }
+
+    // getOptionString: the option's text, with quotes stripped from a string
+    fun optionString(n: int, key: string): string? {
+        var result: string? = null
+        if (hasOption(n, key)) {
+            val v = optionNode(n, key)
+            if (v < 0) result = ""
+            else {
+                val t = text[v]
+                if (type[v] == gtStringLiteral && t.size >= 2) result = t.slice(1, t.size - 1)
+                else result = t
+            }
+        }
+        result
+    }
+
+    fun dupNode(n: int): int {
+        val d = node(type[n], text[n], tok[n], src[n])
+        start[d] = start[n]
+        stop[d] = stop[n]
+        for (i in 0 until optKeys[n].size) {
+            optKeys[d].append(optKeys[n][i])
+            optVals[d].append(optVals[n][i])
+        }
+        withOptions[d] = withOptions[n]
+        altLabel[d] = altLabel[n]
+        greedy[d] = greedy[n]
+        d
+    }
+
+    fun dupTree(n: int): int {
+        val d = dupNode(n)
+        val list = copyInts(kids[n])
+        for (c in list) addChild(d, dupTree(c))
+        d
+    }
+
+    fun firstChildWithType(n: int, ty: int): int {
+        var found = -1
+        for (c in kids[n]) if (found < 0 && type[c] == ty) found = c
+        found
+    }
+
+    // getNodesWithType: breadth first, the node itself included
+    fun nodesWithType(n: int, ty: int): array<int> {
+        val result: array<int> = []
+        val work: array<int> = [n]
+        var i = 0
+        while (i < work.size) {
+            val t = work[i]
+            if (type[t] == ty) result.append(t)
+            for (c in kids[t]) work.append(c)
+            i += 1
+        }
+        result
+    }
+
+    fun preorder(n: int, var out: array<int>): void {
+        out.append(n)
+        for (c in kids[n]) preorder(c, out)
+    }
+
+    fun nodeWithTokenIndex(n: int, index: int): int {
+        var found = -1
+        if (tok[n] == index) found = n
+        else for (c in kids[n]) if (found < 0) found = nodeWithTokenIndex(c, index)
+        found
+    }
+
+    fun firstDescendantWithType(n: int, ty: int): int {
+        var found = -1
+        for (c in kids[n]) {
+            if (found < 0) {
+                if (type[c] == ty) found = c
+                else found = firstDescendantWithType(c, ty)
+            }
+        }
+        found
+    }
+
+    fun isAncestorType(n: int, ty: int): bool {
+        var p = parent[n]
+        var found = false
+        while (!found && p >= 0) {
+            if (type[p] == ty) found = true
+            p = parent[p]
+        }
+        found
+    }
+
+    fun addStream(toks: G4Tokens): int {
+        streams.append(toks)
+        streams.size - 1
+    }
+
+    fun toStringTree(n: int): string {
+        if (kids[n].size == 0) return text[n]
+        var s = "(" + text[n]
+        for (c in kids[n]) s = s + " " + toStringTree(c)
+        s + ")"
+    }
+}
+
+fun g4Ast(): G4Ast = G4Ast([], [], [], [], [], [], [], [], [], [], [], [], [], [], 0, 0, -1, "")

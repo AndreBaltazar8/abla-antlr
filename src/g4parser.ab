@@ -1,0 +1,818 @@
+// The parser for .g4 grammar files: ANTLRParser.g of the ANTLR 4.9 tool,
+// building the same AST, with the token boundaries the tool's parser sets.
+
+import "g4lexer.ab"
+import "g4ast.ab"
+
+val gkLexer = 1
+val gkParser = 2
+val gkCombined = 3
+
+fun G4Ast.skipHidden(): void {
+    while (pPos < streams[pSr].count() && streams[pSr].channel[pPos] != 0) pPos += 1
+}
+
+// LT(k) as a token index, over on-channel tokens
+fun G4Ast.lt(k: int): int {
+    var q = pPos
+    var n = 1
+    while (n < k) {
+        q += 1
+        while (q < streams[pSr].count() && streams[pSr].channel[q] != 0) q += 1
+        n += 1
+    }
+    if (q >= streams[pSr].count()) q = streams[pSr].count() - 1
+    q
+}
+
+fun G4Ast.la(k: int): int = streams[pSr].type[lt(k)]
+
+fun G4Ast.consume(): int {
+    val t = pPos
+    pLast = pPos
+    if (pPos < streams[pSr].count() - 1) pPos += 1
+    skipHidden()
+    t
+}
+
+fun G4Ast.fail(what: string): void {
+    if (pError.size == 0) {
+        val t = pPos
+        pError = "syntax error at token ${t} '${streams[pSr].text[t]}': expected ${what}"
+    }
+}
+
+fun G4Ast.expect(ty: int, what: string): int {
+    var t = -1
+    if (la(1) == ty) t = consume()
+    else fail(what)
+    t
+}
+
+fun G4Ast.ok(): bool = pError.size == 0
+
+fun G4Ast.tnode(t: int): int = node(streams[pSr].type[t], streams[pSr].text[t], t, pSr)
+
+// An imaginary node copying token t (type changed), as Type[$tok, "text"]
+fun G4Ast.imaginary(ty: int, txt: string, t: int): int = node(ty, txt, t, pSr)
+
+fun G4Ast.bounds(n: int, startTok: int): void {
+    setBounds(n, startTok, pLast)
+}
+
+fun G4Ast.setNodeOptions(n: int, options: int): void {
+    if (options >= 0 && childCount(n) > 0 && childCount(options) > 0) {
+        for (c in copyKids(kids[options])) {
+            if (type[c] == gtAssign) setOption(n, text[child(c, 0)], child(c, 1))
+            else setOption(n, text[c], -1)
+        }
+    }
+}
+
+fun G4Ast.isId(t: int): bool = t == gtRuleRef || t == gtTokenRef
+
+fun G4Ast.id(): int {
+    val s = pPos
+    var n = -1
+    if (isId(la(1))) {
+        val t = consume()
+        n = imaginary(gtId, streams[pSr].text[t], t)
+        bounds(n, s)
+    } else fail("an identifier")
+    n
+}
+
+fun G4Ast.qid(): int {
+    val s = pPos
+    var txt = ""
+    if (isId(la(1))) {
+        id()
+        while (la(1) == gtDot && isId(la(2))) {
+            consume()
+            id()
+        }
+        var i = s
+        while (i <= pLast) {
+            txt = txt + streams[pSr].text[i]
+            i += 1
+        }
+    } else fail("an identifier")
+    val n = imaginary(gtId, txt, s)
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.optionValue(): int {
+    var n = -1
+    val t = la(1)
+    if (isId(t)) n = qid()
+    else if (t == gtStringLiteral || t == gtInt) {
+        val s = pPos
+        n = tnode(consume())
+        bounds(n, s)
+    } else if (t == gtAction) {
+        val s = pPos
+        n = tnode(consume())
+        withOptions[n] = true
+        bounds(n, s)
+    } else fail("an option value")
+    n
+}
+
+fun G4Ast.option(): int {
+    val s = pPos
+    val name = id()
+    val a = tnode(expect(gtAssign, "'='"))
+    val v = optionValue()
+    if (ok()) {
+        addChild(a, name)
+        addChild(a, v)
+    }
+    bounds(a, s)
+    a
+}
+
+fun G4Ast.optionsSpec(): int {
+    val s = pPos
+    val t = consume()
+    val n = imaginary(gtOptions, "OPTIONS", t)
+    while (ok() && isId(la(1))) {
+        addChild(n, option())
+        expect(gtSemi, "';'")
+    }
+    expect(gtRBrace, "'}'")
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.delegateGrammar(): int {
+    val s = pPos
+    var n = -1
+    if (la(2) == gtAssign) {
+        val label = id()
+        n = tnode(consume())
+        val name = id()
+        addChild(n, label)
+        addChild(n, name)
+    } else n = id()
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.delegateGrammars(): int {
+    val s = pPos
+    val n = tnode(consume())
+    addChild(n, delegateGrammar())
+    while (ok() && la(1) == gtComma) {
+        consume()
+        addChild(n, delegateGrammar())
+    }
+    expect(gtSemi, "';'")
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.tokensSpec(): int {
+    val s = pPos
+    val n = tnode(consume())
+    var empty = true
+    while (ok() && isId(la(1))) {
+        addChild(n, id())
+        empty = false
+        if (la(1) == gtComma) consume()
+        else if (la(1) == gtSemi) consume()
+    }
+    expect(gtRBrace, "'}'")
+    bounds(n, s)
+    if (empty) -1 else n
+}
+
+fun G4Ast.channelsSpec(): int {
+    val s = pPos
+    val n = tnode(consume())
+    addChild(n, id())
+    while (ok() && la(1) == gtComma) {
+        consume()
+        addChild(n, id())
+    }
+    expect(gtRBrace, "'}'")
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.actionScopeName(): int {
+    val t = la(1)
+    var n = -1
+    if (t == gtLexer || t == gtParser) {
+        val s = pPos
+        val k = consume()
+        n = imaginary(gtId, streams[pSr].text[k], k)
+        bounds(n, s)
+    } else n = id()
+    n
+}
+
+fun G4Ast.action(): int {
+    val s = pPos
+    val n = tnode(consume())
+    if (la(2) == gtColonColon) {
+        addChild(n, actionScopeName())
+        consume()
+    }
+    addChild(n, id())
+    val a = expect(gtAction, "an action")
+    if (a >= 0) {
+        val an = tnode(a)
+        withOptions[an] = true
+        addChild(n, an)
+    }
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.prequelConstruct(): int {
+    val t = la(1)
+    var n = -1
+    if (t == gtOptions) n = optionsSpec()
+    else if (t == gtImport) n = delegateGrammars()
+    else if (t == gtTokensSpec) n = tokensSpec()
+    else if (t == gtChannels) n = channelsSpec()
+    else n = action()
+    n
+}
+
+fun G4Ast.isPrequel(t: int): bool = t == gtOptions || t == gtImport || t == gtTokensSpec || t == gtChannels || t == gtAt
+
+fun G4Ast.ebnfSuffix(): int {
+    val s = pPos
+    val t = la(1)
+    val ty = if (t == gtQuestion) gtOptional else if (t == gtStar) gtClosure else gtPositiveClosure
+    val txt = if (t == gtQuestion) "?" else if (t == gtStar) "*" else "+"
+    val first = consume()
+    var isGreedy = true
+    if (la(1) == gtQuestion) {
+        consume()
+        isGreedy = false
+    }
+    val n = imaginary(ty, txt, first)
+    greedy[n] = isGreedy
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.isSuffix(t: int): bool = t == gtQuestion || t == gtStar || t == gtPlus
+
+fun G4Ast.elementOption(): int {
+    val s = pPos
+    var n = -1
+    if (isId(la(1)) && la(2) == gtAssign) {
+        val name = id()
+        n = tnode(consume())
+        val v = optionValue()
+        addChild(n, name)
+        if (v >= 0) addChild(n, v)
+    } else n = qid()
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.elementOptions(): int {
+    val s = pPos
+    val t = consume()
+    val n = imaginary(gtElementOptions, "ELEMENT_OPTIONS", t)
+    if (la(1) != gtGt) {
+        addChild(n, elementOption())
+        while (ok() && la(1) == gtComma) {
+            consume()
+            addChild(n, elementOption())
+        }
+    }
+    expect(gtGt, "'>'")
+    bounds(n, s)
+    n
+}
+
+// TOKEN|STRING with optional element options as a TerminalAST
+fun G4Ast.terminal(): int {
+    val s = pPos
+    val n = tnode(consume())
+    withOptions[n] = true
+    if (la(1) == gtLt) addChild(n, elementOptions())
+    setNodeOptions(n, firstChildWithType(n, gtElementOptions))
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.range(): int {
+    val s = pPos
+    val a = tnode(consume())
+    withOptions[a] = true
+    val r = tnode(consume())
+    val b0 = expect(gtStringLiteral, "a string literal")
+    if (b0 >= 0) {
+        val b = tnode(b0)
+        withOptions[b] = true
+        addChild(r, a)
+        addChild(r, b)
+    }
+    bounds(r, s)
+    r
+}
+
+fun G4Ast.setElement(): int {
+    val s = pPos
+    var n = -1
+    val t = la(1)
+    if (t == gtStringLiteral && la(2) == gtRange) n = range()
+    else if (t == gtTokenRef || t == gtStringLiteral) {
+        n = tnode(consume())
+        withOptions[n] = true
+        if (la(1) == gtLt) addChild(n, elementOptions())
+        bounds(n, s)
+    } else if (t == gtLexerCharSet) {
+        n = tnode(consume())
+        bounds(n, s)
+    } else fail("a set element")
+    n
+}
+
+fun G4Ast.blockSet(): int {
+    val s = pPos
+    val lp = consume()
+    val n = imaginary(gtSet, "SET", lp)
+    addChild(n, setElement())
+    while (ok() && la(1) == gtOr) {
+        consume()
+        addChild(n, setElement())
+    }
+    expect(gtRParen, "')'")
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.notSet(): int {
+    val s = pPos
+    val nt = consume()
+    val n = imaginary(gtNot, "~", nt)
+    if (la(1) == gtLParen) addChild(n, blockSet())
+    else {
+        val es = pPos
+        val e = setElement()
+        val set = imaginary(gtSet, "SET", es)
+        addChild(set, e)
+        addChild(n, set)
+    }
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.wildcard(): int {
+    val s = pPos
+    val d = consume()
+    val n = imaginary(gtWildcard, ".", d)
+    withOptions[n] = true
+    if (la(1) == gtLt) addChild(n, elementOptions())
+    setNodeOptions(n, firstChildWithType(n, gtElementOptions))
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.ruleref(): int {
+    val s = pPos
+    val n = tnode(consume())
+    withOptions[n] = true
+    if (la(1) == gtArgAction) {
+        val a = tnode(consume())
+        withOptions[a] = true
+        addChild(n, a)
+    }
+    if (la(1) == gtLt) addChild(n, elementOptions())
+    setNodeOptions(n, firstChildWithType(n, gtElementOptions))
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.atom(lexer: bool): int {
+    val s = pPos
+    var n = -1
+    val t = la(1)
+    if (t == gtStringLiteral && la(2) == gtRange) n = range()
+    else if (t == gtTokenRef || t == gtStringLiteral) n = terminal()
+    else if (t == gtRuleRef) {
+        if (lexer) {
+            n = tnode(consume())
+            withOptions[n] = true
+        } else n = ruleref()
+    } else if (t == gtNot) n = notSet()
+    else if (t == gtDot) n = wildcard()
+    else if (lexer && t == gtLexerCharSet) n = tnode(consume())
+    else fail("an element")
+    if (n >= 0) bounds(n, s)
+    n
+}
+
+fun G4Ast.isAtomStart(t: int, lexer: bool): bool =
+    t == gtStringLiteral || t == gtTokenRef || t == gtRuleRef || t == gtNot || t == gtDot || (lexer && t == gtLexerCharSet)
+
+fun G4Ast.actionElement(): int {
+    val s = pPos
+    val n = tnode(consume())
+    withOptions[n] = true
+    if (la(1) == gtLt) {
+        addChild(n, elementOptions())
+        setNodeOptions(n, firstChildWithType(n, gtElementOptions))
+    }
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.block(lexer: bool): int {
+    val s = pPos
+    val lp = consume()
+    val n = imaginary(gtBlock, "BLOCK", lp)
+    withOptions[n] = true
+    var options = -1
+    val actions: array<int> = []
+    if (la(1) == gtOptions || la(1) == gtAt || la(1) == gtColon) {
+        if (la(1) == gtOptions) options = optionsSpec()
+        if (!lexer) {
+            while (ok() && la(1) == gtAt) actions.append(ruleAction())
+        }
+        expect(gtColon, "':'")
+    }
+    if (options >= 0) addChild(n, options)
+    for (a in actions) addChild(n, a)
+    if (lexer) lexerAltList(n) else altList(n)
+    expect(gtRParen, "')'")
+    setNodeOptions(n, options)
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.wrapSuffix(elementStart: int, inner: int): int {
+    val suffix = ebnfSuffix()
+    val blk = imaginary(gtBlock, "BLOCK", elementStart)
+    withOptions[blk] = true
+    val alt = node(gtAlt, "ALT", -1, pSr)
+    withOptions[alt] = true
+    addChild(alt, inner)
+    addChild(blk, alt)
+    addChild(suffix, blk)
+    suffix
+}
+
+fun G4Ast.labeledElement(lexer: bool): int {
+    val s = pPos
+    val label = id()
+    val a = tnode(consume())
+    addChild(a, label)
+    if (la(1) == gtLParen) addChild(a, block(lexer))
+    else addChild(a, atom(lexer))
+    bounds(a, s)
+    a
+}
+
+fun G4Ast.element(lexer: bool): int {
+    val s = pPos
+    var n = -1
+    val t = la(1)
+    if (isId(t) && (la(2) == gtAssign || la(2) == gtPlusAssign)) {
+        val e = labeledElement(lexer)
+        n = if (isSuffix(la(1))) wrapSuffix(s, e) else e
+    } else if (isAtomStart(t, lexer)) {
+        val e = atom(lexer)
+        n = if (isSuffix(la(1))) wrapSuffix(s, e) else e
+    } else if (t == gtLParen) {
+        val b = block(lexer)
+        if (isSuffix(la(1))) {
+            n = ebnfSuffix()
+            addChild(n, b)
+        } else n = b
+    } else if (t == gtAction || t == gtSempred) n = actionElement()
+    else fail("an element")
+    if (n >= 0) bounds(n, s)
+    n
+}
+
+fun G4Ast.isElementStart(t: int, lexer: bool): bool =
+    isAtomStart(t, lexer) || t == gtLParen || t == gtAction || t == gtSempred
+
+fun G4Ast.alternative(): int {
+    val s = pPos
+    val n = node(gtAlt, "ALT", -1, pSr)
+    withOptions[n] = true
+    var o = -1
+    if (la(1) == gtLt) {
+        o = elementOptions()
+        addChild(n, o)
+    }
+    if (isElementStart(la(1), false)) {
+        while (ok() && isElementStart(la(1), false)) addChild(n, element(false))
+    } else addChild(n, node(gtEpsilon, "EPSILON", -1, pSr))
+    setNodeOptions(n, o)
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.altList(blk: int): void {
+    addChild(blk, alternative())
+    while (ok() && la(1) == gtOr) {
+        consume()
+        addChild(blk, alternative())
+    }
+}
+
+fun G4Ast.labeledAlt(): int {
+    val s = pPos
+    val n = alternative()
+    if (la(1) == gtPound) {
+        consume()
+        altLabel[n] = id()
+    }
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.lexerCommandName(): int {
+    var n = -1
+    if (la(1) == gtMode) {
+        val s = pPos
+        val m = consume()
+        n = imaginary(gtId, streams[pSr].text[m], m)
+        bounds(n, s)
+    } else n = id()
+    n
+}
+
+fun G4Ast.lexerCommand(): int {
+    val s = pPos
+    var n = -1
+    val name = lexerCommandName()
+    if (la(1) == gtLParen) {
+        consume()
+        n = node(gtLexerActionCall, "LEXER_ACTION_CALL", -1, pSr)
+        addChild(n, name)
+        var e = -1
+        if (la(1) == gtInt) {
+            val es = pPos
+            e = tnode(consume())
+            bounds(e, es)
+        } else e = id()
+        addChild(n, e)
+        expect(gtRParen, "')'")
+    } else n = name
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.lexerElements(): int {
+    val s = pPos
+    val n = node(gtAlt, "ALT", -1, pSr)
+    withOptions[n] = true
+    if (isElementStart(la(1), true)) {
+        while (ok() && isElementStart(la(1), true)) addChild(n, element(true))
+    } else addChild(n, node(gtEpsilon, "EPSILON", -1, pSr))
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.lexerAlt(): int {
+    val s = pPos
+    val e = lexerElements()
+    var n = e
+    if (la(1) == gtRArrow) {
+        val cs = pPos
+        consume()
+        n = node(gtLexerAltAction, "LEXER_ALT_ACTION", -1, pSr)
+        withOptions[n] = true
+        addChild(n, e)
+        addChild(n, lexerCommand())
+        while (ok() && la(1) == gtComma) {
+            consume()
+            addChild(n, lexerCommand())
+        }
+        // a one-command list collapses to the command, which takes the list's bounds
+        if (childCount(n) == 2) bounds(child(n, 1), cs)
+    }
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.lexerAltList(blk: int): void {
+    addChild(blk, lexerAlt())
+    while (ok() && la(1) == gtOr) {
+        consume()
+        addChild(blk, lexerAlt())
+    }
+}
+
+fun G4Ast.ruleAction(): int {
+    val s = pPos
+    val n = tnode(consume())
+    addChild(n, id())
+    val a = expect(gtAction, "an action")
+    if (a >= 0) {
+        val an = tnode(a)
+        withOptions[an] = true
+        addChild(n, an)
+    }
+    bounds(n, s)
+    n
+}
+
+fun G4Ast.parserRule(): int {
+    val s = pPos
+    val r = node(gtRule, "RULE", -1, pSr)
+    withOptions[r] = true
+    addChild(r, tnode(consume()))
+    if (la(1) == gtArgAction) {
+        val a = tnode(consume())
+        withOptions[a] = true
+        addChild(r, a)
+    }
+    if (la(1) == gtReturns) {
+        val rs = pPos
+        val ret = tnode(consume())
+        val a = tnode(expect(gtArgAction, "'['"))
+        withOptions[a] = true
+        addChild(ret, a)
+        bounds(ret, rs)
+        addChild(r, ret)
+    }
+    if (la(1) == gtThrows) {
+        val ts = pPos
+        val th = tnode(consume())
+        addChild(th, qid())
+        while (ok() && la(1) == gtComma) {
+            consume()
+            addChild(th, qid())
+        }
+        bounds(th, ts)
+        addChild(r, th)
+    }
+    if (la(1) == gtLocals) {
+        val ls = pPos
+        val lo = tnode(consume())
+        val a = tnode(expect(gtArgAction, "'['"))
+        withOptions[a] = true
+        addChild(lo, a)
+        bounds(lo, ls)
+        addChild(r, lo)
+    }
+    var options = -1
+    while (ok() && (la(1) == gtOptions || la(1) == gtAt)) {
+        if (la(1) == gtOptions) {
+            val o = optionsSpec()
+            options = o
+            addChild(r, o)
+        } else addChild(r, ruleAction())
+    }
+    val colon = expect(gtColon, "':'")
+    val bs = pPos
+    val blk = imaginary(gtBlock, "BLOCK", colon)
+    withOptions[blk] = true
+    addChild(blk, labeledAlt())
+    while (ok() && la(1) == gtOr) {
+        consume()
+        addChild(blk, labeledAlt())
+    }
+    bounds(blk, bs)
+    addChild(r, blk)
+    expect(gtSemi, "';'")
+    while (ok() && la(1) == gtCatch) {
+        val c = tnode(consume())
+        val a = tnode(expect(gtArgAction, "'['"))
+        withOptions[a] = true
+        val b = tnode(expect(gtAction, "an action"))
+        withOptions[b] = true
+        addChild(c, a)
+        addChild(c, b)
+        addChild(r, c)
+    }
+    if (ok() && la(1) == gtFinally) {
+        val f = tnode(consume())
+        val b = tnode(expect(gtAction, "an action"))
+        withOptions[b] = true
+        addChild(f, b)
+        addChild(r, f)
+    }
+    setNodeOptions(r, options)
+    bounds(r, s)
+    r
+}
+
+fun G4Ast.lexerRule(): int {
+    val s = pPos
+    val r = node(gtRule, "RULE", -1, pSr)
+    withOptions[r] = true
+    var fragment = -1
+    if (la(1) == gtFragment) fragment = consume()
+    val name = expect(gtTokenRef, "a token name")
+    if (!ok()) return r
+    addChild(r, tnode(name))
+    if (fragment >= 0) {
+        val mods = node(gtRuleModifiers, "RULEMODIFIERS", -1, pSr)
+        addChild(mods, tnode(fragment))
+        addChild(r, mods)
+    }
+    val colon = expect(gtColon, "':'")
+    val bs = pPos
+    val blk = imaginary(gtBlock, "BLOCK", colon)
+    withOptions[blk] = true
+    lexerAltList(blk)
+    bounds(blk, bs)
+    addChild(r, blk)
+    expect(gtSemi, "';'")
+    bounds(r, s)
+    r
+}
+
+fun G4Ast.rule(): int = if (la(1) == gtRuleRef) parserRule() else lexerRule()
+
+fun G4Ast.isRuleStart(t: int): bool = t == gtRuleRef || t == gtTokenRef || t == gtFragment
+
+fun G4Ast.modeSpec(): int {
+    val s = pPos
+    val m = tnode(consume())
+    addChild(m, id())
+    expect(gtSemi, "';'")
+    while (ok() && (la(1) == gtTokenRef || la(1) == gtFragment)) addChild(m, lexerRule())
+    bounds(m, s)
+    m
+}
+
+fun G4Ast.grammarSpec(): int {
+    val s = pPos
+    var kind = gkCombined
+    var txt = "COMBINED_GRAMMAR"
+    if (la(1) == gtLexer) {
+        consume()
+        kind = gkLexer
+        txt = "LEXER_GRAMMAR"
+    } else if (la(1) == gtParser) {
+        consume()
+        kind = gkParser
+        txt = "PARSER_GRAMMAR"
+    }
+    val g = expect(gtGrammar, "'grammar'")
+    val root = imaginary(gtGrammar, txt, g)
+    withOptions[root] = true
+    greedy[root] = false
+    altLabel[root] = kind
+    addChild(root, id())
+    expect(gtSemi, "';'")
+    while (ok() && isPrequel(la(1))) {
+        val c = prequelConstruct()
+        if (c >= 0) addChild(root, c)
+    }
+    val rs = pPos
+    val rules = node(gtRules, "RULES", -1, pSr)
+    while (ok() && isRuleStart(la(1))) addChild(rules, rule())
+    bounds(rules, rs)
+    addChild(root, rules)
+    while (ok() && la(1) == gtMode) addChild(root, modeSpec())
+    if (ok() && la(1) != gtEof) fail("a rule")
+    if (ok()) consume()
+    setNodeOptions(root, firstChildWithType(root, gtOptions))
+    bounds(root, s)
+    root
+}
+
+fun copyKids(xs: array<int>): array<int> {
+    val r: array<int> = []
+    for (x in xs) r.append(x)
+    r
+}
+
+// grammarKind: the root's grammar type (gkLexer, gkParser or gkCombined)
+fun G4Ast.grammarKind(root: int): int = altLabel[root]
+
+// Parses stream sr of the arena; returns the GRAMMAR root, or -1 with error set.
+fun g4Parse(var ast: G4Ast, sr: int, var error: array<string>): int {
+    ast.pSr = sr
+    ast.pPos = 0
+    ast.pLast = -1
+    ast.pError = ""
+    ast.skipHidden()
+    val root = ast.grammarSpec()
+    if (ast.pError.size > 0) {
+        error.append(ast.pError)
+        return -1
+    }
+    root
+}
+
+// Parses one rule (the left-recursion rewrite's artificial rule).
+fun g4ParseRule(var ast: G4Ast, sr: int, var error: array<string>): int {
+    ast.pSr = sr
+    ast.pPos = 0
+    ast.pLast = -1
+    ast.pError = ""
+    ast.skipHidden()
+    val r = ast.rule()
+    if (ast.pError.size > 0) {
+        error.append(ast.pError)
+        return -1
+    }
+    r
+}

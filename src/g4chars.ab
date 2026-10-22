@@ -1,0 +1,302 @@
+// Character literals and escapes as the ANTLR tool reads them (CharSupport
+// and EscapeSequenceParsing), over UTF-16 code units.
+
+import "abla/text"
+import "intervalset.ab"
+import "lexer.ab"
+import "g4unicode.ab"
+
+fun g4Units(s: string): array<int> = copyInts(sourceText(s).units)
+
+fun literalEscape(c: int): int =
+    if (c == 110) 10 else if (c == 114) 13 else if (c == 116) 9 else if (c == 98) 8 else if (c == 102) 12 else if (c == 92) 92 else 0
+
+fun hexValue(c: int): int =
+    if (c >= 48 && c <= 57) c - 48
+    else if (c >= 97 && c <= 102) c - 87
+    else if (c >= 65 && c <= 70) c - 55
+    else -1
+
+// Integer.parseInt(s.substring(from, to), 16), or -1
+fun parseHexValue(u: array<int>, from: int, to: int): int {
+    if (from < 0 || to < 0 || to < from || to > u.size) return -1
+    var i = from
+    var neg = false
+    if (i < to && (u[i] == 43 || u[i] == 45)) {
+        neg = u[i] == 45
+        i += 1
+    }
+    if (i >= to) return -1
+    var v = 0
+    var bad = false
+    while (i < to && !bad) {
+        val h = hexValue(u[i])
+        if (h < 0) bad = true
+        else {
+            v = v * 16 + h
+            if (v > 2147483648) bad = true
+        }
+        i += 1
+    }
+    if (bad || (!neg && v > 2147483647)) return -1
+    if (neg) -v else v
+}
+
+fun indexOfUnit(u: array<int>, c: int, from: int, to: int): int {
+    var at = -1
+    var i = from
+    while (at < 0 && i < to) {
+        if (u[i] == c) at = i
+        i += 1
+    }
+    at
+}
+
+// getCharValueFromCharInGrammarLiteral over u[from until to]
+fun charValueInLiteral(u: array<int>, from: int, to: int): int {
+    val n = to - from
+    if (n == 1) return u[from]
+    if (n == 2) {
+        if (u[from] != 92) return -1
+        val e = u[from + 1]
+        if (e == 39) return e
+        if (e >= 255) return -1
+        val v = literalEscape(e)
+        return if (v == 0) -1 else v
+    }
+    if (n == 6) {
+        if (!(u[from] == 92 && u[from + 1] == 117)) return -1
+        if (u[from + 2] == 123) return parseHexValue(u, from + 3, indexOfUnit(u, 125, from, to))
+        return parseHexValue(u, from + 2, to)
+    }
+    if (n >= 3 && u[from] == 92 && u[from + 1] == 117 && u[from + 2] == 123) return parseHexValue(u, from + 3, indexOfUnit(u, 125, from, to))
+    -1
+}
+
+fun charValueFromLiteral(lit: string): int {
+    val u = g4Units(lit)
+    if (u.size < 3) return -1
+    charValueInLiteral(u, 1, u.size - 1)
+}
+
+fun appendCodePoint(var out: array<int>, c: int): void {
+    if (c > 65535) {
+        val v = c - 65536
+        out.append(55296 + (v >> 10))
+        out.append(56320 + (v & 1023))
+    } else out.append(c)
+}
+
+fun isDigitUnit(c: int): bool = c >= 48 && c <= 57
+
+// getStringFromGrammarStringLiteral as UTF-16 units; ok false for a bad escape
+class G4String(var units: array<int>, var ok: bool)
+
+fun stringFromLiteral(lit: string): G4String {
+    val u = g4Units(lit)
+    val out = G4String([], true)
+    var i = 1
+    val n = u.size - 1
+    while (out.ok && i < n) {
+        var end = i + 1
+        if (u[i] == 92) {
+            end = i + 2
+            if (i + 1 < n && u[i + 1] == 117) {
+                if (i + 2 < n && u[i + 2] == 123) {
+                    end = i + 3
+                    var scanning = true
+                    while (out.ok && scanning) {
+                        if (end + 1 > n) out.ok = false
+                        else {
+                            val c = u[end]
+                            end += 1
+                            if (c == 125) scanning = false
+                            else if (!isDigitUnit(c) && !(c >= 97 && c <= 102) && !(c >= 65 && c <= 70)) out.ok = false
+                        }
+                    }
+                } else {
+                    end = i + 2
+                    while (out.ok && end < i + 6) {
+                        if (end > n) out.ok = false
+                        else {
+                            val c = u[end]
+                            if (!isDigitUnit(c) && !(c >= 97 && c <= 102) && !(c >= 65 && c <= 70)) out.ok = false
+                        }
+                        end += 1
+                    }
+                }
+            }
+        }
+        if (out.ok && end > n) out.ok = false
+        if (out.ok) {
+            val c = charValueInLiteral(u, i, end)
+            if (c == -1) out.ok = false
+            else appendCodePoint(out.units, c)
+        }
+        i = end
+    }
+    out
+}
+
+fun codePointAtUnits(u: array<int>, i: int): int {
+    val c = u[i]
+    if (c >= 55296 && c <= 56319 && i + 1 < u.size) {
+        val d = u[i + 1]
+        if (d >= 56320 && d <= 57343) return 65536 + ((c - 55296) << 10) + (d - 56320)
+    }
+    c
+}
+
+fun charCount(c: int): int = if (c > 65535) 2 else 1
+
+val escInvalid = 0
+val escCodePoint = 1
+val escProperty = 2
+
+class G4Escape(val type: int, val codePoint: int, val property: IntervalSet, val parseLength: int)
+
+fun escInvalidAt(start: int, stop: int): G4Escape = G4Escape(escInvalid, 0, intervalSet(), stop - start + 1)
+
+// EscapeSequenceParsing.parseEscape(s, startOff)
+fun parseEscape(u: array<int>, startOff: int): G4Escape {
+    var offset = startOff
+    if (offset + 2 > u.size || codePointAtUnits(u, offset) != 92) return escInvalidAt(startOff, u.size - 1)
+    offset += 1
+    val escaped = codePointAtUnits(u, offset)
+    offset += charCount(escaped)
+    if (escaped == 117) {
+        if (offset + 3 > u.size) return escInvalidAt(startOff, u.size - 1)
+        var hexStart = 0
+        var hexEnd = 0
+        if (codePointAtUnits(u, offset) == 123) {
+            hexStart = offset + 1
+            hexEnd = indexOfUnit(u, 125, hexStart, u.size)
+            if (hexEnd == -1) return escInvalidAt(startOff, u.size - 1)
+            offset = hexEnd + 1
+        } else {
+            if (offset + 4 > u.size) return escInvalidAt(startOff, u.size - 1)
+            hexStart = offset
+            hexEnd = offset + 4
+            offset = hexEnd
+        }
+        val v = parseHexValue(u, hexStart, hexEnd)
+        if (v == -1 || v > 1114111) return escInvalidAt(startOff, startOff + 6 - 1)
+        return G4Escape(escCodePoint, v, intervalSet(), offset - startOff)
+    }
+    if (escaped == 112 || escaped == 80) {
+        if (offset + 3 > u.size) return escInvalidAt(startOff, u.size - 1)
+        if (codePointAtUnits(u, offset) != 123) return escInvalidAt(startOff, offset)
+        val close = indexOfUnit(u, 125, offset, u.size)
+        if (close == -1) return escInvalidAt(startOff, u.size - 1)
+        val name: array<int> = []
+        var k = offset + 1
+        while (k < close) {
+            name.append(u[k])
+            k += 1
+        }
+        val prop = unicodeProperty(name)
+        if (prop == null) return escInvalidAt(startOff, close)
+        val set = if (escaped == 80) prop.complement(0, 1114111) else prop.copy()
+        return G4Escape(escProperty, -1, set, close + 1 - startOff)
+    }
+    if (escaped < 255) {
+        var cp = literalEscape(escaped)
+        if (cp == 0) {
+            if (escaped != 93 && escaped != 45) return escInvalidAt(startOff, startOff + 1)
+            cp = escaped
+        }
+        return G4Escape(escCodePoint, cp, intervalSet(), offset - startOff)
+    }
+    escInvalidAt(startOff, u.size - 1)
+}
+
+fun unicodeProperty(name: array<int>): IntervalSet? {
+    var s = ""
+    for (c in name) {
+        if (c >= 128) return null
+        s = s + utf8Encode(c)
+    }
+    unicodePropertySet(s)
+}
+
+val csNone = 0
+val csError = 1
+val csPrevCodePoint = 2
+val csPrevProperty = 3
+
+class CharSetState(var mode: int, var inRange: bool, var prevCodePoint: int, var prevProperty: IntervalSet)
+
+class CharSetResult(var set: IntervalSet, var error: string)
+
+fun applyPrevState(var set: IntervalSet, st: CharSetState): void {
+    if (st.mode == csPrevCodePoint) set.addOne(st.prevCodePoint)
+    else if (st.mode == csPrevProperty) set.addSet(st.prevProperty)
+}
+
+// LexerATNFactory.getSetFromCharSetLiteral over the text of [...]
+fun setFromCharSetLiteral(text: string): CharSetResult {
+    val all = g4Units(text)
+    val u: array<int> = []
+    var k = 1
+    while (k < all.size - 1) {
+        u.append(all[k])
+        k += 1
+    }
+    val result = CharSetResult(intervalSet(), "")
+    val st = CharSetState(csNone, false, -1, intervalSet())
+    val n = u.size
+    var i = 0
+    while (i < n && st.mode != csError) {
+        val c = codePointAtUnits(u, i)
+        var offset = charCount(c)
+        if (c == 92) {
+            val e = parseEscape(u, i)
+            if (e.type == escInvalid) {
+                st.mode = csError
+                result.error = "invalid escape sequence"
+            } else if (e.type == escCodePoint) {
+                if (st.inRange) {
+                    if (st.prevCodePoint > e.codePoint) result.error = "empty range"
+                    result.set.addRange(st.prevCodePoint, e.codePoint)
+                    st.mode = csNone
+                    st.inRange = false
+                } else {
+                    applyPrevState(result.set, st)
+                    st.mode = csPrevCodePoint
+                    st.prevCodePoint = e.codePoint
+                }
+            } else {
+                if (st.inRange) {
+                    st.mode = csError
+                    result.error = "unicode property in range"
+                } else {
+                    applyPrevState(result.set, st)
+                    st.mode = csPrevProperty
+                    st.prevCodePoint = -1
+                    st.prevProperty = e.property.copy()
+                }
+            }
+            offset = e.parseLength
+        } else if (c == 45 && !st.inRange && i != 0 && i != n - 1 && st.mode != csNone) {
+            if (st.mode == csPrevProperty) {
+                st.mode = csError
+                result.error = "unicode property in range"
+            } else st.inRange = true
+        } else {
+            if (st.inRange) {
+                if (st.prevCodePoint > c) result.error = "empty range"
+                result.set.addRange(st.prevCodePoint, c)
+                st.mode = csNone
+                st.inRange = false
+            } else {
+                applyPrevState(result.set, st)
+                st.mode = csPrevCodePoint
+                st.prevCodePoint = c
+            }
+        }
+        i += offset
+    }
+    if (st.mode == csError) result.set = intervalSet()
+    else applyPrevState(result.set, st)
+    result
+}

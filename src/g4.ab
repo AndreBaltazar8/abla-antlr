@@ -1,0 +1,117 @@
+// Compiling .g4 grammars: the ANTLR 4.9 tool's pipeline from grammar text to
+// the .interp files it writes, which antlrLoad reads.
+
+import "abla/text"
+import "intervalset.ab"
+import "lexer.ab"
+import "g4lexer.ab"
+import "g4ast.ab"
+import "g4parser.ab"
+import "g4chars.ab"
+import "g4tool.ab"
+import "g4atn.ab"
+
+fun G4Tool.vocabFor(name: string): string {
+    val tokens = sources.get(name + ".tokens")
+    if (tokens != null) return "" + tokens
+    val src = sources.get(name + ".g4")
+    if (src == null) {
+        fail("cannot find tokens file $name.tokens")
+        return ""
+    }
+    val sub = g4Tool(sources)
+    val out = g4Output()
+    sub.process(src, name + ".g4", out)
+    if (out.error.size > 0) fail(out.error)
+    "" + out.vocab
+}
+
+fun G4Tool.importTokensFile(gi: int): void {
+    val vocab = ast.optionString(grammars[gi].root, "tokenVocab")
+    if (vocab == null) return
+    val text = vocabFor(vocab)
+    val names: array<string> = []
+    val types: Map<string, int> = Map()
+    for (line in text.split("\n")) {
+        val e = vocabLine(line)
+        if (e != null) {
+            if (!types.has(e.name)) names.append(e.name)
+            types.set(e.name, e.type)
+        }
+    }
+    for (n in names) {
+        val v = types.get(n)
+        if (v != null) {
+            if (n.size > 0 && n[0] == 39) grammars[gi].defineStringLiteralType(n, v)
+            else grammars[gi].defineTokenNameType(n, v)
+        }
+    }
+}
+
+fun G4Tool.processNonCombined(gi: int, var out: G4Output): string {
+    collectRules(gi)
+    if (error.size > 0) return ""
+    translateLeftRecursiveRules(gi)
+    if (error.size > 0) return ""
+    for (r in 0 until grammars[gi].ruleNames.size) grammars[gi].ruleIndex.set(grammars[gi].ruleNames[r], r)
+    val syms = collectSymbols(gi)
+    importTokensFile(gi)
+    if (grammars[gi].kind == gkLexer) assignLexerTokenTypes(gi, syms)
+    else {
+        for (d in copyStringList(syms.tokensDefs)) grammars[gi].defineTokenName(d)
+        for (d in copyStringList(syms.tokenRefs)) grammars[gi].defineTokenName(d)
+    }
+    for (c in syms.channelDefs) grammars[gi].defineChannelName(c)
+    if (error.size > 0) return ""
+    val atn = createAtn(gi)
+    if (error.size > 0) return ""
+    val lexer = grammars[gi].kind == gkLexer
+    for (n in grammars[gi].sempreds) {
+        if (lexer) out.lexerPredicates.append(ast.text[n]) else out.parserPredicates.append(ast.text[n])
+    }
+    if (lexer) {
+        for (n in grammars[gi].lexerActions) out.lexerActions.append(ast.text[n])
+    } else {
+        for (i in 0 until atn.actionStates.size) {
+            out.parserActionStates.append(atn.stateNumber(atn.actionStates[i]))
+            out.parserActions.append(ast.text[atn.actionNodes[i]])
+        }
+    }
+    interpText(gi, atn)
+}
+
+fun G4Tool.process(text: string, fileName: string, var out: G4Output): void {
+    val gi = parseGrammar(text, fileName)
+    if (gi < 0) {
+        out.error = error
+        return
+    }
+    loadImported(gi)
+    integrateImports(gi)
+    reduceBlocksToSets(grammars[gi].root)
+    val kind = grammars[gi].kind
+    if (kind == gkCombined && error.size == 0) {
+        val li = extractImplicitLexer(gi)
+        if (li >= 0) {
+            out.lexerInterp = processNonCombined(li, out)
+            importVocab(gi, li)
+        }
+    }
+    if (error.size == 0) {
+        val interp = processNonCombined(gi, out)
+        if (kind == gkLexer) out.lexerInterp = interp else out.parserInterp = interp
+        out.vocab = grammars[gi].vocabText()
+    }
+    out.error = error
+}
+
+// Compiles the grammar named main from sources (file name, such as
+// "Expr.g4", to text; imports and token vocabularies are looked up there).
+fun g4Compile(sources: Map<string, string>, main: string): G4Output {
+    val tool = g4Tool(sources)
+    val out = g4Output()
+    val text = sources.get(main + ".g4")
+    if (text == null) out.error = "can't find grammar $main.g4"
+    else tool.process(text, main + ".g4", out)
+    out
+}

@@ -1,11 +1,11 @@
 ABLAC ?= $(HOME)/.abla/bin/ablac
 BUILD_DIR ?= build
 
-.PHONY: all check unit tools conformance fuzz clean
+.PHONY: all check unit tools g4 conformance fuzz clean
 
 all: check
 
-check: unit tools
+check: unit tools g4
 
 unit:
 	mkdir -p $(BUILD_DIR)
@@ -16,6 +16,10 @@ tools:
 	mkdir -p $(BUILD_DIR)
 	$(ABLAC) build tests/parse_dump.ab -o $(BUILD_DIR)/parse-dump
 	$(ABLAC) build tests/atn_dump.ab -o $(BUILD_DIR)/atn-dump
+	$(ABLAC) build tests/g4_interp.ab -o $(BUILD_DIR)/g4-interp
+
+g4: tools
+	tools/g4_check.sh $(BUILD_DIR)/g4-interp $(BUILD_DIR)/g4
 
 # make conformance LEXER=… PARSER=… LEXER_JS=… PARSER_JS=… RULE=… INPUTS="…"
 conformance: tools

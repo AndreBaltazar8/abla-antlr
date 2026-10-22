@@ -1,0 +1,29 @@
+import "abla/io"
+import "abla/fs"
+import "abla/process"
+import "abla/text"
+import "../src/g4.ab"
+
+// g4-interp DIR NAME OUTDIR: compiles DIR/NAME.g4 (other .g4 files in DIR
+// are importable) and writes the .interp files into OUTDIR.
+fun main: int {
+    val dir = processArgument(0)
+    val name = processArgument(1)
+    val outDir = processArgument(2)
+    val sources: Map<string, string> = Map()
+    for (e in path(dir).entries()) {
+        val n = e.name()
+        if (n.endsWith(".g4") || n.endsWith(".tokens")) sources.set(n, e.readText())
+    }
+    val out = g4Compile(sources, name)
+    if (out.error.size > 0) {
+        eprintln(out.error)
+        return 1
+    }
+    if (out.lexerInterp.size > 0) {
+        val ln = if (out.parserInterp.size > 0) name + "Lexer" else name
+        path(outDir + "/" + ln + ".interp").writeText(out.lexerInterp)
+    }
+    if (out.parserInterp.size > 0) path(outDir + "/" + name + ".interp").writeText(out.parserInterp)
+    0
+}

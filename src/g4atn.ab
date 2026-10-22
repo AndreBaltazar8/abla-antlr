@@ -1,0 +1,923 @@
+// ATN construction from grammar ASTs (ParserATNFactory, LexerATNFactory,
+// TailEpsilonRemover, ATNOptimizer) and the version 3 serialization the tool
+// writes into .interp files.
+
+import "abla/text"
+import "intervalset.ab"
+import "atn.ab"
+import "lexer.ab"
+import "g4lexer.ab"
+import "g4ast.ab"
+import "g4parser.ab"
+import "g4chars.ab"
+import "g4tool.ab"
+
+class H(val l: int, val r: int)
+
+class G4Atn(
+    val lexer: bool,
+    val maxTokenType: int,
+    var stype: array<int>,
+    var srule: array<int>,
+    var removed: array<bool>,
+    var strans: array<array<int>>,
+    var endState: array<int>,
+    var loopBack: array<int>,
+    var nonGreedy: array<bool>,
+    var lrStart: array<bool>,
+    var ttype: array<int>,
+    var ttarget: array<int>,
+    var ta: array<int>,
+    var tb: array<int>,
+    var tc: array<int>,
+    var tfollow: array<int>,
+    var tset: array<IntervalSet?>,
+    var ruleToStart: array<int>,
+    var ruleToStop: array<int>,
+    var ruleToTokenType: array<int>,
+    var modeToStart: array<int>,
+    var decisions: array<int>,
+    var actType: array<int>,
+    var actA: array<int>,
+    var actB: array<int>,
+    var currentRule: int,
+    var predIndex: Map<int, int>,
+    var actionIndex: Map<int, int>,
+    var actionStates: array<int>,
+    var actionNodes: array<int>
+) {
+    fun newState(kind: int, rule: int): int {
+        val s = stype.size
+        stype.append(kind)
+        srule.append(rule)
+        removed.append(false)
+        strans.append([])
+        endState.append(-1)
+        loopBack.append(-1)
+        nonGreedy.append(false)
+        lrStart.append(false)
+        s
+    }
+
+    fun basic(): int = newState(stBasic, currentRule)
+
+    fun removeState(s: int): void {
+        removed[s] = true
+    }
+
+    fun defineDecision(s: int): void {
+        decisions.append(s)
+    }
+
+    fun isEps(t: int): bool {
+        val k = ttype[t]
+        k == trEpsilon || k == trRule || k == trPredicate || k == trAction || k == trPrecedence
+    }
+
+    fun labelOf(t: int): IntervalSet? {
+        val k = ttype[t]
+        if (k == trAtom) return intervalSetOf(ta[t])
+        if (k == trRange) {
+            val s = intervalSet()
+            s.addRange(ta[t], tb[t])
+            return s
+        }
+        if (k == trSet || k == trNotSet) {
+            val s = tset[t]
+            if (s != null) return s.copy()
+        }
+        null
+    }
+
+    fun newTransition(kind: int, target: int, a: int, b: int, c: int, follow: int, set: IntervalSet?): int {
+        val t = ttype.size
+        ttype.append(kind)
+        ttarget.append(target)
+        ta.append(a)
+        tb.append(b)
+        tc.append(c)
+        tfollow.append(follow)
+        tset.append(set)
+        t
+    }
+
+    // ATNState.addTransition(index, e): an equal transition to the same target is dropped
+    fun addAt(s: int, index: int, t: int): void {
+        var present = false
+        val el = labelOf(t)
+        for (o in strans[s]) {
+            if (!present && ttarget[o] == ttarget[t]) {
+                val ol = labelOf(o)
+                if (ol != null && el != null && sameSet(ol, el)) present = true
+                else if (isEps(o) && isEps(t)) present = true
+            }
+        }
+        if (!present) {
+            if (index < 0 || index >= strans[s].size) strans[s].append(t)
+            else {
+                strans[s].append(t)
+                var j = strans[s].size - 1
+                while (j > index) {
+                    strans[s][j] = strans[s][j - 1]
+                    j -= 1
+                }
+                strans[s][index] = t
+            }
+        }
+    }
+
+    fun add(s: int, kind: int, target: int, a: int, b: int, c: int, follow: int, set: IntervalSet?): void {
+        addAt(s, -1, newTransition(kind, target, a, b, c, follow, set))
+    }
+
+    fun epsilon(a: int, b: int): void {
+        add(a, trEpsilon, b, 0, 0, 0, -1, null)
+    }
+
+    fun epsilonPrepend(a: int, b: int): void {
+        addAt(a, 0, newTransition(trEpsilon, b, 0, 0, 0, -1, null))
+    }
+
+    fun codePoint(s: int, target: int, cp: int): void {
+        if (cp > 65535) add(s, trSet, target, 0, 0, 0, -1, intervalSetOf(cp))
+        else add(s, trAtom, target, cp, 0, 0, -1, null)
+    }
+
+    fun codePointRange(s: int, target: int, from: int, to: int): void {
+        if (from > 65535 || to > 65535) {
+            val set = intervalSet()
+            set.addRange(from, to)
+            add(s, trSet, target, 0, 0, 0, -1, set)
+        } else add(s, trRange, target, from, to, 0, -1, null)
+    }
+
+    fun lexerActionIndex(kind: int, a: int, b: int): int {
+        var at = -1
+        for (i in 0 until actType.size) if (at < 0 && actType[i] == kind && actA[i] == a && actB[i] == b) at = i
+        if (at < 0) {
+            actType.append(kind)
+            actA.append(a)
+            actB.append(b)
+            at = actType.size - 1
+        }
+        at
+    }
+
+    fun elemList(els: array<H>): H {
+        for (i in 0 until els.size - 1) {
+            val el = els[i]
+            val tr = if (strans[el.l].size == 1) strans[el.l][0] else -1
+            val isRule = tr >= 0 && ttype[tr] == trRule
+            if (stype[el.l] == stBasic && stype[el.r] == stBasic && tr >= 0 && ((isRule && tfollow[tr] == el.r) || ttarget[tr] == el.r)) {
+                if (isRule) tfollow[tr] = els[i + 1].l
+                else ttarget[tr] = els[i + 1].l
+                removeState(el.r)
+            } else epsilon(el.r, els[i + 1].l)
+        }
+        H(els[0].l, els[els.size - 1].r)
+    }
+
+    fun tailVisitState(p: int): void {
+        if (stype[p] == stBasic && strans[p].size == 1) {
+            val t = strans[p][0]
+            var q = ttarget[t]
+            if (ttype[t] == trRule) q = tfollow[t]
+            if (stype[q] == stBasic && strans[q].size == 1) {
+                val t2 = strans[q][0]
+                if (ttype[t2] == trEpsilon) {
+                    val r = ttarget[t2]
+                    val rt = stype[r]
+                    if (rt == stBlockEnd || rt == stPlusLoopBack || rt == stStarLoopBack) {
+                        if (ttype[t] == trRule) tfollow[t] = r
+                        else ttarget[t] = r
+                        removeState(q)
+                    }
+                }
+            }
+        }
+    }
+
+    fun tailVisit(s: int, var visited: array<bool>): void {
+        if (visited[s]) return
+        visited[s] = true
+        tailVisitState(s)
+        val n = strans[s].size
+        for (i in 0 until n) tailVisit(ttarget[strans[s][i]], visited)
+    }
+
+    fun tailEpsilonRemove(s: int): void {
+        val visited = filledArray(stype.size, false)
+        tailVisit(s, visited)
+    }
+
+    fun makeBlock(start: int, alts: array<H>): H {
+        val end = newState(stBlockEnd, currentRule)
+        endState[start] = end
+        for (alt in alts) {
+            epsilon(start, alt.l)
+            epsilon(alt.r, end)
+            tailEpsilonRemove(alt.l)
+        }
+        H(start, end)
+    }
+
+    fun optional(greedy: bool, blk: H): H {
+        nonGreedy[blk.l] = !greedy
+        if (greedy) epsilon(blk.l, blk.r) else epsilonPrepend(blk.l, blk.r)
+        blk
+    }
+
+    fun plus(greedy: bool, blk: H): H {
+        val loop = newState(stPlusLoopBack, currentRule)
+        nonGreedy[loop] = !greedy
+        defineDecision(loop)
+        val end = newState(stLoopEnd, currentRule)
+        loopBack[end] = loop
+        epsilon(blk.r, loop)
+        if (greedy) {
+            epsilon(loop, blk.l)
+            epsilon(loop, end)
+        } else {
+            epsilon(loop, end)
+            epsilon(loop, blk.l)
+        }
+        H(blk.l, end)
+    }
+
+    fun star(greedy: bool, blk: H): H {
+        val entry = newState(stStarLoopEntry, currentRule)
+        nonGreedy[entry] = !greedy
+        defineDecision(entry)
+        val end = newState(stLoopEnd, currentRule)
+        val loop = newState(stStarLoopBack, currentRule)
+        loopBack[end] = loop
+        if (greedy) {
+            epsilon(entry, blk.l)
+            epsilon(entry, end)
+        } else {
+            epsilon(entry, end)
+            epsilon(entry, blk.l)
+        }
+        epsilon(blk.r, loop)
+        epsilon(loop, entry)
+        H(entry, end)
+    }
+
+    // ATNOptimizer.optimizeSets: a lexer decision's single-symbol alternatives
+    // into one block become one set transition
+    fun optimizeSets(ruleNames: array<string>): void {
+        for (d in copyInts(decisions)) {
+            var skip = false
+            val ri = srule[d]
+            if (ri >= 0 && ri < ruleNames.size) {
+                val b = ruleNames[ri][0]
+                if (b >= 97 && b <= 122) skip = true
+            }
+            if (!skip) {
+                val alts = intervalSet()
+                for (i in 0 until strans[d].size) {
+                    val e = strans[d][i]
+                    if (ttype[e] == trEpsilon) {
+                        val tgt = ttarget[e]
+                        if (strans[tgt].size == 1) {
+                            val m = strans[tgt][0]
+                            if (stype[ttarget[m]] == stBlockEnd) {
+                                val k = ttype[m]
+                                if (k == trAtom || k == trRange || k == trSet) alts.addOne(i)
+                            }
+                        }
+                    }
+                }
+                var iv = alts.starts.size - 1
+                while (iv >= 0) {
+                    val a = alts.starts[iv]
+                    val b = alts.stops[iv] - 1
+                    if (b - a + 1 > 1) {
+                        val first = ttarget[strans[d][a]]
+                        val blockEnd = ttarget[strans[first][0]]
+                        val matchSet = intervalSet()
+                        var j0 = a
+                        while (j0 <= b) {
+                            val m = strans[ttarget[strans[d][j0]]][0]
+                            val lab = labelOf(m)
+                            if (lab != null) matchSet.addSet(lab)
+                            j0 += 1
+                        }
+                        val nt = if (matchSet.starts.size == 1) {
+                            if (matchSet.count() == 1) {
+                                val cp = matchSet.starts[0]
+                                if (cp > 65535) newTransition(trSet, blockEnd, 0, 0, 0, -1, matchSet.copy())
+                                else newTransition(trAtom, blockEnd, cp, 0, 0, -1, null)
+                            } else {
+                                val lo = matchSet.starts[0]
+                                val hi = matchSet.stops[0] - 1
+                                if (lo > 65535 || hi > 65535) newTransition(trSet, blockEnd, 0, 0, 0, -1, matchSet.copy())
+                                else newTransition(trRange, blockEnd, lo, hi, 0, -1, null)
+                            }
+                        } else newTransition(trSet, blockEnd, 0, 0, 0, -1, matchSet.copy())
+                        strans[first][0] = nt
+                        var j = a + 1
+                        while (j <= b) {
+                            val removedT = strans[d][a + 1]
+                            removeAt(d, a + 1)
+                            removeState(ttarget[removedT])
+                            j += 1
+                        }
+                    }
+                    iv -= 1
+                }
+            }
+        }
+    }
+
+    fun removeAt(s: int, i: int): void {
+        var j = i
+        while (j + 1 < strans[s].size) {
+            strans[s][j] = strans[s][j + 1]
+            j += 1
+        }
+        strans[s].truncate(strans[s].size - 1)
+    }
+}
+
+fun sameSet(a: IntervalSet, b: IntervalSet): bool {
+    if (a.starts.size != b.starts.size) return false
+    var same = true
+    for (i in 0 until a.starts.size) if (a.starts[i] != b.starts[i] || a.stops[i] != b.stops[i]) same = false
+    same
+}
+
+fun g4Atn(lexer: bool, maxTokenType: int): G4Atn =
+    G4Atn(lexer, maxTokenType, [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], -1,
+        Map(), Map(), [], [])
+
+fun G4Tool.atnTokenType(gi: int, text: string): int = grammars[gi].getTokenType(text)
+
+fun G4Tool.fRuleRef(gi: int, var atn: G4Atn, n: int): H {
+    val r = grammars[gi].ruleOf(ast.text[n])
+    if (r < 0) {
+        fail("rule ${ast.text[n]} undefined")
+        val s = atn.basic()
+        return H(s, s)
+    }
+    val start = atn.ruleToStart[r]
+    val left = atn.basic()
+    val right = atn.basic()
+    var prec = 0
+    val p = ast.optionString(n, "p")
+    if (p != null) prec = parseDecimal(p)
+    atn.add(left, trRule, start, r, prec, 0, right, null)
+    H(left, right)
+}
+
+fun parseDecimal(s: string): int {
+    var v = 0
+    for (c in s) if (c >= 48 && c <= 57) v = v * 10 + (c - 48)
+    v
+}
+
+fun G4Tool.fTokenRef(gi: int, var atn: G4Atn, n: int): H {
+    if (atn.lexer) {
+        if (ast.text[n] == "EOF") {
+            val l = atn.basic()
+            val r = atn.basic()
+            atn.add(l, trAtom, r, -1, 0, 0, -1, null)
+            return H(l, r)
+        }
+        return fRuleRef(gi, atn, n)
+    }
+    val l = atn.basic()
+    val r = atn.basic()
+    atn.add(l, trAtom, r, atnTokenType(gi, ast.text[n]), 0, 0, -1, null)
+    H(l, r)
+}
+
+fun G4Tool.fStringLiteral(gi: int, var atn: G4Atn, n: int): H {
+    if (!atn.lexer) return fTokenRef(gi, atn, n)
+    val left = atn.basic()
+    val s = stringFromLiteral(ast.text[n])
+    if (!s.ok) return H(left, left)
+    var prev = left
+    var right = left
+    var i = 0
+    while (i < s.units.size) {
+        right = atn.basic()
+        val cp = codePointAtUnits(s.units, i)
+        atn.codePoint(prev, right, cp)
+        prev = right
+        i += charCount(cp)
+    }
+    if (s.units.size == 0) fail("empty string literal")
+    H(left, right)
+}
+
+fun G4Tool.fSet(gi: int, var atn: G4Atn, setNode: int, invert: bool): H {
+    val left = atn.basic()
+    val right = atn.basic()
+    val set = intervalSet()
+    for (t in copyKids(ast.kids[setNode])) {
+        val ty = ast.type[t]
+        if (atn.lexer) {
+            if (ty == gtRange) {
+                val a = charValueFromLiteral(ast.text[ast.child(t, 0)])
+                val b = charValueFromLiteral(ast.text[ast.child(t, 1)])
+                if (a != -1 && b != -1 && a <= b) set.addRange(a, b)
+            } else if (ty == gtLexerCharSet) {
+                val cs = setFromCharSetLiteral(ast.text[t])
+                set.addSet(cs.set.copy())
+            }
+            else if (ty == gtStringLiteral) {
+                val c = charValueFromLiteral(ast.text[t])
+                if (c != -1) set.addOne(c)
+                else fail("invalid literal ${ast.text[t]} in a lexer set")
+            } else if (ty == gtTokenRef) fail("token reference ${ast.text[t]} in a lexer set")
+        } else set.addOne(atnTokenType(gi, ast.text[t]))
+    }
+    if (invert) atn.add(left, trNotSet, right, 0, 0, 0, -1, set)
+    else if (atn.lexer && set.starts.size == 1) atn.codePointRange(left, right, set.starts[0], set.stops[0] - 1)
+    else atn.add(left, trSet, right, 0, 0, 0, -1, set)
+    H(left, right)
+}
+
+fun G4Tool.fRange(gi: int, var atn: G4Atn, n: int): H {
+    val a = ast.child(n, 0)
+    val b = ast.child(n, 1)
+    if (!atn.lexer) {
+        fail("token range in a parser")
+        return fTokenRef(gi, atn, a)
+    }
+    val left = atn.basic()
+    val right = atn.basic()
+    val t1 = charValueFromLiteral(ast.text[a])
+    val t2 = charValueFromLiteral(ast.text[b])
+    if (t1 == -1 || t2 == -1) fail("invalid literal in a lexer range")
+    atn.codePointRange(left, right, t1, t2)
+    H(left, right)
+}
+
+fun G4Tool.fCharSet(var atn: G4Atn, n: int): H {
+    val left = atn.basic()
+    val right = atn.basic()
+    val r = setFromCharSetLiteral(ast.text[n])
+    if (r.error.size > 0) fail("${ast.text[n]}: ${r.error}")
+    atn.add(left, trSet, right, 0, 0, 0, -1, r.set)
+    H(left, right)
+}
+
+// UseDefAnalyzer.actionIsContextDependent: the action refers to $attributes
+fun actionIsContextDependent(text: string): bool {
+    var i = 0
+    var dep = false
+    while (!dep && i < text.size) {
+        val c = text[i]
+        if (c == 47 && i + 1 < text.size && text[i + 1] == 42) {
+            val e = text.indexOf("*/", i + 2)
+            i = if (e < 0) text.size else e + 2
+        } else if (c == 47 && i + 1 < text.size && text[i + 1] == 47) {
+            val e = text.indexOf("\n", i + 2)
+            if (e < 0) i += 1 else i = e + 1
+        } else if (c == 92) i += 2
+        else if (c == 36 && i + 1 < text.size) {
+            val d = text[i + 1]
+            if ((d >= 97 && d <= 122) || (d >= 65 && d <= 90) || d == 95) dep = true
+            i += 1
+        } else i += 1
+    }
+    dep
+}
+
+fun G4Tool.fSempred(var atn: G4Atn, n: int): H {
+    val left = atn.basic()
+    val right = atn.basic()
+    val p = ast.optionString(n, "p")
+    if (p != null) atn.add(left, trPrecedence, right, parseDecimal(p), 0, 0, -1, null)
+    else {
+        val idx = atn.predIndex.get(n)
+        val pi = if (idx == null) -1 else idx
+        val dep = if (actionIsContextDependent(ast.text[n])) 1 else 0
+        atn.add(left, trPredicate, right, atn.currentRule, pi, dep, -1, null)
+    }
+    H(left, right)
+}
+
+fun G4Tool.fAction(var atn: G4Atn, n: int): H {
+    val left = atn.basic()
+    val right = atn.basic()
+    if (atn.lexer) {
+        val idx = atn.actionIndex.get(n)
+        val ai = if (idx == null) -1 else idx
+        val li = atn.lexerActionIndex(laCustom, atn.currentRule, ai)
+        atn.add(left, trAction, right, atn.currentRule, li, 0, -1, null)
+    } else {
+        atn.add(left, trAction, right, atn.currentRule, -1, 0, -1, null)
+        atn.actionStates.append(left)
+        atn.actionNodes.append(n)
+    }
+    H(left, right)
+}
+
+fun isCommonConstant(s: string): bool =
+    s == "HIDDEN" || s == "DEFAULT_TOKEN_CHANNEL" || s == "DEFAULT_MODE" || s == "SKIP" || s == "MORE" || s == "EOF" || s == "MAX_CHAR_VALUE" || s == "MIN_CHAR_VALUE"
+
+fun isDecimal(s: string): bool {
+    var ok = s.size > 0
+    for (c in s) if (c < 48 || c > 57) ok = false
+    ok
+}
+
+fun G4Tool.fLexerCommand(gi: int, var atn: G4Atn, idNode: int, arg: int): H {
+    val cmd = ast.text[idNode]
+    val argText = if (arg >= 0) ast.text[arg] else ""
+    var kind = -1
+    var value = 0
+    if (arg < 0) {
+        if (cmd == "skip") kind = laSkip
+        else if (cmd == "more") kind = laMore
+        else if (cmd == "popMode") kind = laPopMode
+    } else if (cmd == "mode" || cmd == "pushMode") {
+        var m = -2
+        if (argText == "DEFAULT_MODE") m = 0
+        else if (isCommonConstant(argText)) fail("mode $argText conflicts with a common constant")
+        else {
+            val at = grammars[gi].modeIndex(argText)
+            if (at >= 0) m = at
+            else if (isDecimal(argText)) m = parseDecimal(argText)
+            else fail("$argText is not a recognized mode name")
+        }
+        if (m != -2) {
+            kind = if (cmd == "mode") laMode else laPushMode
+            value = m
+        }
+    } else if (cmd == "type") {
+        var t = -2
+        if (argText == "EOF") t = -1
+        else if (isCommonConstant(argText)) fail("token $argText conflicts with a common constant")
+        else {
+            val tt = grammars[gi].getTokenType(argText)
+            if (tt != 0) t = tt
+            else if (isDecimal(argText)) t = parseDecimal(argText)
+            else fail("$argText is not a recognized token name")
+        }
+        if (t != -2) {
+            kind = laType
+            value = t
+        }
+    } else if (cmd == "channel") {
+        var c = -2
+        if (argText == "HIDDEN") c = 1
+        else if (argText == "DEFAULT_TOKEN_CHANNEL") c = 0
+        else if (isCommonConstant(argText)) fail("channel $argText conflicts with a common constant")
+        else {
+            val cv = grammars[gi].channelValue(argText)
+            if (cv >= 2) c = cv
+            else if (isDecimal(argText)) c = parseDecimal(argText)
+            else fail("$argText is not a recognized channel name")
+        }
+        if (c != -2) {
+            kind = laChannel
+            value = c
+        }
+    }
+    if (kind < 0) {
+        fail("lexer command $cmd is not supported")
+        val e = atn.basic()
+        val f = atn.basic()
+        atn.epsilon(e, f)
+        return H(e, f)
+    }
+    val left = atn.basic()
+    val right = atn.basic()
+    val li = atn.lexerActionIndex(kind, value, 0)
+    atn.add(left, trAction, right, atn.currentRule, li, 0, -1, null)
+    H(left, right)
+}
+
+fun G4Tool.fBlock(gi: int, var atn: G4Atn, blk: int, ebnfRoot: int): H {
+    val alts: array<H> = []
+    for (c in copyKids(ast.kids[blk])) {
+        val t = ast.type[c]
+        if (t == gtAlt || t == gtLexerAltAction) alts.append(fAlternative(gi, atn, c))
+    }
+    if (ebnfRoot < 0) {
+        if (alts.size == 1) return alts[0]
+        val start = atn.newState(stBlockStart, atn.currentRule)
+        if (alts.size > 1) atn.defineDecision(start)
+        return atn.makeBlock(start, alts)
+    }
+    val et = ast.type[ebnfRoot]
+    val greedy = ast.greedy[ebnfRoot]
+    if (et == gtOptional) {
+        val start = atn.newState(stBlockStart, atn.currentRule)
+        atn.defineDecision(start)
+        return atn.optional(greedy, atn.makeBlock(start, alts))
+    }
+    if (et == gtClosure) {
+        val start = atn.newState(stStarBlockStart, atn.currentRule)
+        if (alts.size > 1) atn.defineDecision(start)
+        return atn.star(greedy, atn.makeBlock(start, alts))
+    }
+    val start = atn.newState(stPlusBlockStart, atn.currentRule)
+    if (alts.size > 1) atn.defineDecision(start)
+    atn.plus(greedy, atn.makeBlock(start, alts))
+}
+
+fun G4Tool.fAlternative(gi: int, var atn: G4Atn, n: int): H {
+    if (ast.type[n] == gtLexerAltAction) {
+        val a = fAlternative(gi, atn, ast.child(n, 0))
+        val cmds: array<H> = []
+        for (i in 1 until ast.childCount(n)) {
+            val c = ast.child(n, i)
+            if (ast.type[c] == gtLexerActionCall) cmds.append(fLexerCommand(gi, atn, ast.child(c, 0), ast.child(c, 1)))
+            else cmds.append(fLexerCommand(gi, atn, c, -1))
+        }
+        val h = atn.elemList(cmds)
+        atn.epsilon(a.r, h.l)
+        return H(a.l, h.r)
+    }
+    val els: array<H> = []
+    for (c in copyKids(ast.kids[n])) {
+        val t = ast.type[c]
+        if (t == gtEpsilon) {
+            val l = atn.basic()
+            val r = atn.basic()
+            atn.epsilon(l, r)
+            return H(l, r)
+        }
+        if (t != gtElementOptions) els.append(fElement(gi, atn, c))
+    }
+    atn.elemList(els)
+}
+
+fun G4Tool.fElement(gi: int, var atn: G4Atn, n: int): H {
+    val t = ast.type[n]
+    if (t == gtAssign || t == gtPlusAssign) return fElement(gi, atn, ast.child(n, 1))
+    if (t == gtRange) return fRange(gi, atn, n)
+    if (t == gtWildcard) {
+        val l = atn.basic()
+        val r = atn.basic()
+        atn.add(l, trWildcard, r, 0, 0, 0, -1, null)
+        return H(l, r)
+    }
+    if (t == gtSet) return fSet(gi, atn, n, false)
+    if (t == gtStringLiteral) return fStringLiteral(gi, atn, n)
+    if (t == gtTokenRef) return fTokenRef(gi, atn, n)
+    if (t == gtRuleRef) return fRuleRef(gi, atn, n)
+    if (t == gtOptional || t == gtClosure || t == gtPositiveClosure) return fBlock(gi, atn, ast.child(n, 0), n)
+    if (t == gtBlock) return fBlock(gi, atn, n, -1)
+    if (t == gtAction) return fAction(atn, n)
+    if (t == gtSempred) return fSempred(atn, n)
+    if (t == gtNot) return fSet(gi, atn, ast.child(n, 0), true)
+    if (t == gtLexerCharSet) return fCharSet(atn, n)
+    fail("unexpected element ${ast.text[n]}")
+    val s = atn.basic()
+    H(s, s)
+}
+
+fun G4Tool.createAtn(gi: int): G4Atn {
+    val lexer = grammars[gi].kind == gkLexer
+    val atn = g4Atn(lexer, grammars[gi].maxType())
+    for (i in 0 until grammars[gi].sempreds.size) atn.predIndex.set(grammars[gi].sempreds[i], i)
+    for (i in 0 until grammars[gi].lexerActions.size) atn.actionIndex.set(grammars[gi].lexerActions[i], i)
+    val nrules = grammars[gi].ruleNames.size
+    if (lexer) {
+        for (m in 0 until grammars[gi].modeNames.size) {
+            val s = atn.newState(stTokenStart, -1)
+            atn.modeToStart.append(s)
+            atn.defineDecision(s)
+        }
+        for (r in 0 until nrules) atn.ruleToTokenType.append(grammars[gi].getTokenType(grammars[gi].ruleNames[r]))
+    }
+    for (r in 0 until nrules) {
+        val start = atn.newState(stRuleStart, r)
+        val stop = atn.newState(stRuleStop, r)
+        atn.lrStart[start] = grammars[gi].ruleLr[r]
+        atn.ruleToStart.append(start)
+        atn.ruleToStop.append(stop)
+    }
+    for (r in 0 until nrules) {
+        atn.currentRule = r
+        val blk = ast.firstChildWithType(grammars[gi].ruleAst[r], gtBlock)
+        val h = fBlock(gi, atn, blk, -1)
+        atn.epsilon(atn.ruleToStart[r], h.l)
+        atn.epsilon(h.r, atn.ruleToStop[r])
+    }
+    if (lexer) {
+        for (m in 0 until grammars[gi].modeNames.size) {
+            for (r in copyInts(grammars[gi].modeRules[m])) {
+                if (!grammars[gi].ruleFragment[r]) atn.epsilon(atn.modeToStart[m], atn.ruleToStart[r])
+            }
+        }
+        atn.optimizeSets(grammars[gi].ruleNames)
+    } else {
+        for (p in 0 until atn.stype.size) {
+            if (!atn.removed[p] && atn.stype[p] == stBasic && atn.strans[p].size == 1) {
+                val t = atn.strans[p][0]
+                if (atn.ttype[t] == trRule) atn.epsilon(atn.ruleToStop[atn.ta[t]], atn.tfollow[t])
+            }
+        }
+        val eofTarget = atn.basic()
+        for (r in 0 until nrules) {
+            val stop = atn.ruleToStop[r]
+            if (atn.strans[stop].size == 0) atn.add(stop, trAtom, eofTarget, -1, 0, 0, -1, null)
+        }
+    }
+    atn
+}
+
+fun serializeCodePoint(var data: array<int>, cp: int, smp: bool): void {
+    if (smp) {
+        data.append(cp & 65535)
+        data.append((cp >> 16) & 65535)
+    } else data.append(cp)
+}
+
+fun serializeSets(var data: array<int>, sets: array<IntervalSet>, smp: bool): void {
+    data.append(sets.size)
+    for (set in sets) {
+        val containsEof = set.contains(-1)
+        val n = set.starts.size
+        if (containsEof && set.stops[0] - 1 == -1) data.append(n - 1) else data.append(n)
+        data.append(if (containsEof) 1 else 0)
+        for (k in 0 until n) {
+            val a = set.starts[k]
+            val b = set.stops[k] - 1
+            if (a == -1) {
+                if (b != -1) {
+                    serializeCodePoint(data, 0, smp)
+                    serializeCodePoint(data, b, smp)
+                }
+            } else {
+                serializeCodePoint(data, a, smp)
+                serializeCodePoint(data, b, smp)
+            }
+        }
+    }
+}
+
+fun orFFFF(v: int): int = if (v == -1) 65535 else v
+
+// ATNSerializer.serialize, with the +2 shift the tool writes
+fun G4Atn.serialize(): array<int> {
+    val num = filledArray(stype.size, -1)
+    var count = 0
+    for (s in 0 until stype.size) {
+        if (!removed[s]) {
+            num[s] = count
+            count += 1
+        }
+    }
+    val data: array<int> = [3, 24713, 42792, 33073, 47595, 16762, 15333, 30596, 22882]
+    data.append(if (lexer) 0 else 1)
+    data.append(maxTokenType)
+    data.append(count)
+    var nedges = 0
+    val sets: array<IntervalSet> = []
+    val nonGreedyStates: array<int> = []
+    val precedenceStates: array<int> = []
+    for (s in 0 until stype.size) {
+        if (!removed[s]) {
+            val k = stype[s]
+            if (nonGreedy[s]) nonGreedyStates.append(num[s])
+            if (k == stRuleStart && lrStart[s]) precedenceStates.append(num[s])
+            data.append(k)
+            data.append(orFFFF(srule[s]))
+            if (k == stLoopEnd) data.append(num[loopBack[s]])
+            else if (k == stBlockStart || k == stPlusBlockStart || k == stStarBlockStart) data.append(num[endState[s]])
+            if (k != stRuleStop) nedges += strans[s].size
+            for (t in strans[s]) {
+                if (ttype[t] == trSet || ttype[t] == trNotSet) {
+                    val set = tset[t]
+                    if (set != null) {
+                        var present = false
+                        for (o in sets) if (sameSet(o, set)) present = true
+                        if (!present) sets.append(set.copy())
+                    }
+                }
+            }
+        }
+    }
+    data.append(nonGreedyStates.size)
+    for (s in nonGreedyStates) data.append(s)
+    data.append(precedenceStates.size)
+    for (s in precedenceStates) data.append(s)
+    data.append(ruleToStart.size)
+    for (r in 0 until ruleToStart.size) {
+        data.append(num[ruleToStart[r]])
+        if (lexer) data.append(orFFFF(ruleToTokenType[r]))
+    }
+    data.append(modeToStart.size)
+    for (m in modeToStart) data.append(num[m])
+    val bmp: array<IntervalSet> = []
+    val smp: array<IntervalSet> = []
+    for (set in sets) {
+        if (!set.isNil() && set.stops[set.stops.size - 1] - 1 <= 65535) bmp.append(set.copy()) else smp.append(set.copy())
+    }
+    serializeSets(data, bmp, false)
+    serializeSets(data, smp, true)
+    data.append(nedges)
+    for (s in 0 until stype.size) {
+        if (!removed[s] && stype[s] != stRuleStop) {
+            for (t in strans[s]) {
+                val k = ttype[t]
+                var trg = num[ttarget[t]]
+                var a1 = 0
+                var a2 = 0
+                var a3 = 0
+                if (k == trRule) {
+                    trg = num[tfollow[t]]
+                    a1 = num[ttarget[t]]
+                    a2 = ta[t]
+                    a3 = tb[t]
+                } else if (k == trPrecedence) a1 = ta[t]
+                else if (k == trPredicate) {
+                    a1 = ta[t]
+                    a2 = tb[t]
+                    a3 = tc[t]
+                } else if (k == trRange) {
+                    a1 = ta[t]
+                    a2 = tb[t]
+                    if (a1 == -1) {
+                        a1 = 0
+                        a3 = 1
+                    }
+                } else if (k == trAtom) {
+                    a1 = ta[t]
+                    if (a1 == -1) {
+                        a1 = 0
+                        a3 = 1
+                    }
+                } else if (k == trAction) {
+                    a1 = ta[t]
+                    a2 = orFFFF(tb[t])
+                    a3 = tc[t]
+                } else if (k == trSet || k == trNotSet) {
+                    val set = tset[t]
+                    if (set != null) {
+                        var idx = -1
+                        for (i in 0 until bmp.size) if (idx < 0 && sameSet(bmp[i], set)) idx = i
+                        for (i in 0 until smp.size) if (idx < 0 && sameSet(smp[i], set)) idx = bmp.size + i
+                        a1 = idx
+                    }
+                }
+                data.append(num[s])
+                data.append(trg)
+                data.append(k)
+                data.append(a1)
+                data.append(a2)
+                data.append(a3)
+            }
+        }
+    }
+    data.append(decisions.size)
+    for (d in decisions) data.append(num[d])
+    if (lexer) {
+        data.append(actType.size)
+        for (i in 0 until actType.size) {
+            val k = actType[i]
+            data.append(k)
+            if (k == laCustom) {
+                data.append(orFFFF(actA[i]))
+                data.append(orFFFF(actB[i]))
+            } else if (k == laChannel || k == laMode || k == laPushMode || k == laType) {
+                data.append(orFFFF(actA[i]))
+                data.append(0)
+            } else {
+                data.append(0)
+                data.append(0)
+            }
+        }
+    }
+    for (i in 1 until data.size) data[i] = (data[i] + 2) & 65535
+    data
+}
+
+fun G4Atn.stateNumber(s: int): int {
+    var n = 0
+    for (i in 0 until s) if (!removed[i]) n += 1
+    n
+}
+
+fun namesBlock(title: string, names: array<string?>): string {
+    var s = title + "\n"
+    for (n in names) s = s + (if (n == null) "null" else n) + "\n"
+    s + "\n"
+}
+
+fun G4Tool.interpText(gi: int, atn: G4Atn): string {
+    var s = namesBlock("token literal names:", grammars[gi].literalNames())
+    s = s + namesBlock("token symbolic names:", grammars[gi].symbolicNames())
+    s = s + "rule names:\n"
+    for (r in grammars[gi].ruleNames) s = s + r + "\n"
+    s = s + "\n"
+    if (grammars[gi].kind == gkLexer) {
+        s = s + "channel names:\nDEFAULT_TOKEN_CHANNEL\nHIDDEN\n"
+        for (c in grammars[gi].channelToName) s = s + (if (c == null) "null" else c) + "\n"
+        s = s + "\nmode names:\n"
+        for (m in grammars[gi].modeNames) s = s + m + "\n"
+    }
+    s = s + "\natn:\n["
+    val data = atn.serialize()
+    val parts: array<string> = []
+    for (v in data) parts.append("$v")
+    s + textJoin(parts, ", ") + "]"
+}

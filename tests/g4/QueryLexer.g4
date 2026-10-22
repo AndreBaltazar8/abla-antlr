@@ -1,0 +1,23 @@
+lexer grammar QueryLexer;
+
+SELECT : [sS] [eE] [lL] [eE] [cC] [tT] ;
+FROM : [fF] [rR] [oO] [mM] ;
+WHERE : [wW] [hH] [eE] [rR] [eE] ;
+AND : [aA] [nN] [dD] ;
+OR : [oO] [rR] ;
+NOT : [nN] [oO] [tT] ;
+STAR : '*' ;
+COMMA : ',' ;
+DOT : '.' ;
+LPAREN : '(' ;
+RPAREN : ')' ;
+EQ : '=' ;
+NEQ : '<>' | '!=' ;
+LT : '<' ;
+LE : '<=' ;
+GT : '>' ;
+GE : '>=' ;
+NUMBER : [0-9]+ ('.' [0-9]+)? ;
+TEXT : '\'' ('\'\'' | ~'\'')* '\'' ;
+IDENT : [a-zA-Z_] [a-zA-Z_0-9]* | '"' ~'"'+ '"' ;
+WS : [ \t\r\n]+ -> channel(HIDDEN) ;

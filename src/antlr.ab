@@ -1,7 +1,8 @@
-// An ANTLR 4 runtime for Abla, in interpreter mode: grammars load from the
-// .interp files the ANTLR tool writes, and parse exactly as the antlr4 4.9
-// JavaScript runtime with the tool's generated parser does (tokens, trees,
-// syntax error messages and recovery).
+// An ANTLR 4 runtime for Abla, in interpreter mode: grammars load from .g4
+// files (compiled as the ANTLR 4.9 tool does) or from the .interp files the
+// tool writes, and parse exactly as the antlr4 4.9 JavaScript runtime with the
+// tool's generated parser does (tokens, trees, syntax error messages and
+// recovery).
 
 import "atn.ab"
 import "context.ab"
@@ -10,6 +11,7 @@ import "lexer.ab"
 import "grammar.ab"
 import "engine.ab"
 import "interpret.ab"
+import "g4.ab"
 
 val nodeRule = 0
 val nodeToken = 1
@@ -74,6 +76,30 @@ fun antlrLoad(lexerInterp: string, parserInterp: string): Antlr {
         parserDfas.append(dfaFor(s, d, atn.stateType[s] == stStarLoopEntry && atn.precedenceDecision[s]))
     }
     Antlr(lexerAtn, grammar, lexer, engine(parserDfas), error)
+}
+
+// Compiles .g4 grammars and loads them. sources maps file names ("Expr.g4")
+// to their text, imported grammars and token vocabularies included. For a
+// combined grammar, lexerGrammar and parserGrammar are the same name.
+fun antlrLoadGrammars(sources: Map<string, string>, lexerGrammar: string, parserGrammar: string): Antlr {
+    val lexerOut = g4Compile(sources, lexerGrammar)
+    var lexerInterp = lexerOut.lexerInterp
+    var parserInterp = lexerOut.parserInterp
+    var error = lexerOut.error
+    if (error.size == 0 && parserGrammar != lexerGrammar) {
+        val parserOut = g4Compile(sources, parserGrammar)
+        parserInterp = parserOut.parserInterp
+        error = parserOut.error
+    }
+    if (error.size == 0 && lexerInterp.size == 0) error = "$lexerGrammar has no lexer rules"
+    if (error.size == 0 && parserInterp.size == 0) error = "$parserGrammar has no parser rules"
+    if (error.size > 0) return antlrFailed(error)
+    antlrLoad(lexerInterp, parserInterp)
+}
+
+fun antlrFailed(error: string): Antlr {
+    val a = antlrLoad("", "")
+    Antlr(a.lexerAtn, a.parser, a.lexer, a.engine, error)
 }
 
 fun Antlr.ruleNames(): array<string> = parser.ruleNames

@@ -1,10 +1,11 @@
 # Abla ANTLR
 
-An ANTLR 4 runtime for Abla. Grammars load from the `.interp` files the ANTLR
-tool writes next to its generated code, so no Java is needed at build or run
-time. A parse behaves exactly as the antlr4 4.9 JavaScript runtime does with
-the tool's generated parser: the same tokens, the same parse tree, the same
-syntax error messages at the same positions, and the same error recovery.
+An ANTLR 4 runtime for Abla. Grammars load from `.g4` files, compiled the way
+the ANTLR 4.9 tool compiles them, or from the `.interp` files the tool writes
+next to its generated code, so no Java is needed at build or run time. A parse
+behaves exactly as the antlr4 4.9 JavaScript runtime does with the tool's
+generated parser: the same tokens, the same parse tree, the same syntax error
+messages at the same positions, and the same error recovery.
 
 ```abla
 import "abla/io"
@@ -25,6 +26,18 @@ fun main: int {
 ```
 
 ## API
+
+`antlrLoadGrammars(sources, lexerGrammar, parserGrammar)` compiles `.g4`
+grammars and returns an `Antlr`. `sources` maps file names (`"Expr.g4"`) to
+their text, with any imported grammars and token vocabularies (`.g4` or
+`.tokens`). A combined grammar passes its name twice; a separate lexer and
+parser pass both names.
+
+```abla
+val sources: Map<string, string> = Map()
+sources.set("Expr.g4", path("Expr.g4").readText())
+val antlr = antlrLoadGrammars(sources, "Expr", "Expr")
+```
 
 `antlrLoad(lexerInterp, parserInterp)` takes the text of the two `.interp`
 files (a combined grammar's tool output has both) and returns an `Antlr`.
@@ -79,6 +92,17 @@ that failed before choosing has 0.
 - The serialized ATN is the version 3 format of ANTLR 4.9 (with or without
   the Unicode SMP sets). ANTLR 4.10 and later write a different format.
 
+## How grammars compile
+
+`src/g4*.ab` is a port of the tool's front end: its grammar lexer and parser
+(the same ASTs, token indexes and boundaries), imports, the implicit lexer of
+a combined grammar, block-to-set reduction, the left-recursion rewrite (which,
+as in the tool, renders the rule as text and parses it again), token, channel
+and mode numbering, the ATN factories with their epsilon removal and set
+optimization, and the serializer. The output is the `.interp` text the tool
+writes, byte for byte, Unicode `\p{...}` properties included (their ranges are
+the tool's own tables).
+
 ## How it matches the generated parser
 
 Generated parser code and `ParserInterpreter` don't report errors the same way:
@@ -96,6 +120,9 @@ equal to false.
 ```sh
 make check
 ```
+
+`make g4` compiles the grammars in `tests/g4` and compares the `.interp`
+output with what the ANTLR 4.9.3 tool wrote for them (`tests/g4/expected`).
 
 `make conformance` compares this runtime with a generated JavaScript parser on
 a set of inputs: `tools/oracle.mjs` dumps tokens, the tree and the syntax

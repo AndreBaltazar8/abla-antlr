@@ -40,3 +40,4 @@ for (const f of failures) {
 }
 for (const [g, c] of Object.entries(byGroup)) console.log(`${g}: ${c.pass}/${c.pass + c.fail}`);
 console.log(`passed ${pass} of ${pass + fail}` + (skipped ? ` (${skipped} not run: ignored for the JavaScript target too)` : ""));
+process.exit(fail ? 1 : 0);

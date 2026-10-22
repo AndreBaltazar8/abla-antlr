@@ -54,6 +54,7 @@ rule and returns an `AntlrResult`:
 | `tokens` | every token the lexer produced, hidden channels and `EOF` included |
 | `errors` | the parser's syntax errors, `AntlrError(line, column, message)` |
 | `lexerErrors` | token recognition errors; the lexer skips the character, as with the default listener |
+| `messages` | everything the default error listener would print, lexer and parser, in order |
 
 `AntlrNode` is a rule node or a token node:
 
@@ -80,15 +81,32 @@ that failed before choosing has 0.
 
 `antlrTreeText(node, ruleNames)` is `toStringTree(ruleNames)`.
 
+`antlr.tokenize(source)` only lexes, returning the tokens and lexer errors.
+Set `antlr.codePoints` to read the input as code points, as a
+`CharStreams` stream does, instead of UTF-16 code units. The
+lexer is `antlr.engine.lexer`.
+
+### Actions and predicates
+
+A grammar loaded from `.g4` keeps its actions, `@members`, rule arguments,
+returns and locals, and semantic predicates. They are written for the
+JavaScript target, and `antlr.useActions()` runs them in a small embedded
+interpreter for that language (`src/script*.ab`): `this`, `$attributes`,
+labels, `$ctx`, `this._input`, `println`, functions in `@members`. Without
+`useActions()` actions do nothing and predicates are true, as with
+`ParserInterpreter`. `antlr.actionErrors()` lists code that didn't parse and
+names the interpreter couldn't resolve. `.interp` files carry no action code.
+
 ## Scope
 
-- Lexers: modes, `skip`, `more`, `type`, `channel`, `pushMode`/`popMode`.
-  Custom actions and semantic predicates in lexer rules have no code to run
-  in interpreter mode: actions do nothing and predicates are true.
+- Lexers: modes, `skip`, `more`, `type`, `channel`, `pushMode`/`popMode`,
+  custom actions and predicates (with `useActions()`).
 - Parsers: ALL(\*) prediction (SLL with the DFA cache, then full-context LL),
   left-recursive rules with precedence predicates, the generated code's
-  LL(1) switches and `sync` points, and `DefaultErrorStrategy`. User
-  semantic predicates (`{...}?`) are true; embedded actions do nothing.
+  LL(1) switches and `sync` points, `DefaultErrorStrategy`, and the
+  `DiagnosticErrorListener` reports.
+- Actions are the JavaScript target's, run by an interpreter for the subset
+  grammars use, not arbitrary JavaScript.
 - The serialized ATN is the version 3 format of ANTLR 4.9 (with or without
   the Unicode SMP sets). ANTLR 4.10 and later write a different format.
 
@@ -123,6 +141,15 @@ make check
 
 `make g4` compiles the grammars in `tests/g4` and compares the `.interp`
 output with what the ANTLR 4.9.3 tool wrote for them (`tests/g4/expected`).
+
+`make suite` runs ANTLR 4.9.3's own runtime testsuite, the descriptors
+every target runs, with `tools/suite/Abla.test.stg` rendering the grammars'
+target templates as JavaScript-target actions. The first run fetches the
+testsuite and the tool jar and extracts the tests (`tools/suite/setup.sh`,
+which needs git, curl and a JDK). Each test's grammars compile from `.g4`,
+and its output and error stream must equal the expected ones. All 339 tests
+the JavaScript target runs pass; the 4 it skips are skipped here too.
+`FILTER=LexerExec` runs a subset.
 
 `make conformance` compares this runtime with a generated JavaScript parser on
 a set of inputs: `tools/oracle.mjs` dumps tokens, the tree and the syntax

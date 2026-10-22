@@ -1,7 +1,7 @@
 ABLAC ?= $(HOME)/.abla/bin/ablac
 BUILD_DIR ?= build
 
-.PHONY: all check unit tools g4 conformance fuzz clean
+.PHONY: all check unit tools g4 suite conformance fuzz clean
 
 all: check
 
@@ -20,6 +20,14 @@ tools:
 
 g4: tools
 	tools/g4_check.sh $(BUILD_DIR)/g4-interp $(BUILD_DIR)/g4
+
+# make suite SUITE_DIR=…: ANTLR 4.9.3's runtime testsuite (needs a JDK the first time)
+SUITE_DIR ?= $(BUILD_DIR)/suite-src
+suite:
+	mkdir -p $(BUILD_DIR)
+	$(ABLAC) build tests/suite_run.ab -o $(BUILD_DIR)/suite-run
+	@if [ ! -f "$(SUITE_DIR)/tests.jsonl" ]; then tools/suite/setup.sh $(SUITE_DIR); fi
+	bun tools/suite/run.mjs $(SUITE_DIR)/tests.jsonl $(BUILD_DIR)/suite $(BUILD_DIR)/suite-run $(FILTER)
 
 # make conformance LEXER=… PARSER=… LEXER_JS=… PARSER_JS=… RULE=… INPUTS="…"
 conformance: tools

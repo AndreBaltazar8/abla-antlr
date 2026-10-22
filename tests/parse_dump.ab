@@ -1,0 +1,31 @@
+import "abla/io"
+import "abla/fs"
+import "abla/process"
+import "../src/antlr.ab"
+
+fun esc(s: string): string = s.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+fun main: int {
+    val antlr = antlrLoad(path(processArgument(0)).readText(), path(processArgument(1)).readText())
+    if (antlr.error.size > 0) {
+        eprintln(antlr.error)
+        return 1
+    }
+    val rule = processArgument(2)
+    var i = 3
+    while (i < processArgumentCount()) {
+        val result = antlr.parse(path(processArgument(i)).readText(), rule)
+        val out = bufferedStandardOutput()
+        out.writeLine("#tokens")
+        for (t in result.tokens) out.writeLine("${t.type} ${t.channel} ${t.line}:${t.column} ${t.start} ${t.stop} ${esc(t.text)}")
+        out.writeLine("#tree")
+        out.writeLine(antlrTreeText(result.tree, antlr.ruleNames()))
+        out.writeLine("#errors")
+        for (e in result.errors) out.writeLine("${e.line}:${e.column} ${esc(e.message)}")
+        out.writeLine("#lexer")
+        for (e in result.lexerErrors) out.writeLine("${e.line}:${e.column} ${esc(e.message)}")
+        out.flush()
+        i += 1
+    }
+    0
+}

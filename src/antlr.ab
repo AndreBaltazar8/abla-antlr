@@ -1,0 +1,170 @@
+// An ANTLR 4 runtime for Abla, in interpreter mode: grammars load from the
+// .interp files the ANTLR tool writes, and parse exactly as the antlr4 4.9
+// JavaScript runtime with the tool's generated parser does (tokens, trees,
+// syntax error messages and recovery).
+
+import "atn.ab"
+import "context.ab"
+import "configs.ab"
+import "lexer.ab"
+import "grammar.ab"
+import "engine.ab"
+import "interpret.ab"
+
+val nodeRule = 0
+val nodeToken = 1
+val nodeError = 2
+
+class AntlrToken(
+    val type: int,
+    val text: string,
+    val line: int,
+    val column: int,
+    val channel: int,
+    val tokenIndex: int,
+    val start: int,
+    val stop: int
+)
+
+// A parse tree node: a rule context (ruleIndex, alt, children) or a token
+// (token; nodeError for tokens matched or conjured during error recovery).
+class AntlrNode(
+    val kind: int,
+    val ruleIndex: int,
+    val alt: int,
+    val token: AntlrToken?,
+    val children: array<AntlrNode>,
+    val startToken: int,
+    val stopToken: int
+)
+
+class AntlrError(val line: int, val column: int, val message: string)
+
+class AntlrResult(
+    val tree: AntlrNode,
+    val tokens: array<AntlrToken>,
+    val errors: array<AntlrError>,
+    val lexerErrors: array<AntlrError>
+)
+
+// A loaded grammar pair; error is empty when loading succeeded.
+class Antlr(
+    val lexerAtn: Atn,
+    val parser: ParserGrammar,
+    var lexer: Lexer,
+    var engine: Engine,
+    val error: string
+)
+
+fun antlrLoad(lexerInterp: string, parserInterp: string): Antlr {
+    val lexerAtn = deserializeAtn(parseInterp(lexerInterp).atnValues)
+    val grammar = compileParserGrammar(parserInterp)
+    var error = ""
+    if (lexerAtn.error.size > 0) error = "lexer: ${lexerAtn.error}"
+    else if (lexerAtn.grammarType != atnLexer) error = "lexer: not a lexer ATN"
+    else if (grammar.error.size > 0) error = "parser: ${grammar.error}"
+    val lexerDfas: array<Dfa> = []
+    for (m in 0 until lexerAtn.modeToStart.size) lexerDfas.append(dfaFor(lexerAtn.modeToStart[m], m, false))
+    val lexer = Lexer(contextPool(), configPool(), executorPool(), lexerDfas,
+        sourceText(""), 0, 1, 0, -1, 0, [], -1, 0, -1, -1, false, 0, 0, -1, -1, -1, false, tokens(), [])
+    val parserDfas: array<Dfa> = []
+    val atn = grammar.atn
+    for (d in 0 until atn.decisionToState.size) {
+        val s = atn.decisionToState[d]
+        parserDfas.append(dfaFor(s, d, atn.stateType[s] == stStarLoopEntry && atn.precedenceDecision[s]))
+    }
+    Antlr(lexerAtn, grammar, lexer, engine(parserDfas), error)
+}
+
+fun Antlr.ruleNames(): array<string> = parser.ruleNames
+
+fun Antlr.lex(source: string): void {
+    lexer.input = sourceText(source)
+    lexer.index = 0
+    lexer.line = 1
+    lexer.column = 0
+    lexer.startIndex = -1
+    lexer.mode = 0
+    lexer.modeStack.clear()
+    lexer.hitEof = false
+    lexer.out = tokens()
+    lexer.errors = []
+    lexer.tokenizeAll(lexerAtn)
+}
+
+fun Antlr.resetEngine(): void {
+    engine.tokens = lexer.out
+    engine.streamCount = lexer.out.count()
+    engine.ctxRule.clear()
+    engine.ctxParent.clear()
+    engine.ctxInvoking.clear()
+    engine.ctxStart.clear()
+    engine.ctxStop.clear()
+    engine.ctxAlt.clear()
+    engine.ctxChildren.clear()
+    engine.cur = -1
+    engine.state = -1
+    engine.precStack.clear()
+    engine.precStack.append(0)
+    engine.recovering = false
+    engine.lastErrorIndex = -1
+    engine.lastErrorStates.clear()
+    engine.hasLastErrorStates = false
+    engine.exc = excNone
+    engine.errors = []
+    engine.frameParent.clear()
+    engine.frameParentState.clear()
+    engine.frameStart.clear()
+    engine.seek(0)
+}
+
+fun Engine.buildToken(t: int): AntlrToken =
+    AntlrToken(tokens.type[t], tokens.text[t], tokens.line[t], tokens.column[t], tokens.channel[t], tokens.tokenIndex[t], tokens.start[t], tokens.stop[t])
+
+fun Engine.buildNode(ctx: int): AntlrNode {
+    val children: array<AntlrNode> = []
+    for (child in ctxChildren[ctx]) {
+        if (child >= 0) children.append(buildNode(child))
+        else {
+            val code = -1 - child
+            val t = code / 2
+            children.append(AntlrNode(if (code % 2 == 1) nodeError else nodeToken, -1, 0, buildToken(t), [], t, t))
+        }
+    }
+    AntlrNode(nodeRule, ctxRule[ctx], ctxAlt[ctx], null, children, ctxStart[ctx], ctxStop[ctx])
+}
+
+fun antlrErrorList(errors: array<SyntaxErr>): array<AntlrError> {
+    val result: array<AntlrError> = []
+    for (e in errors) result.append(AntlrError(e.line, e.column, e.message))
+    result
+}
+
+// Parses source from the named start rule.
+fun Antlr.parse(source: string, startRule: string): AntlrResult {
+    lex(source)
+    resetEngine()
+    val rule = parser.ruleIndex(startRule)
+    val root = if (rule >= 0) engine.invokeRule(parser, rule, 0) else engine.newContext(0, -1, -1)
+    val tokenList: array<AntlrToken> = []
+    for (t in 0 until engine.streamCount) tokenList.append(engine.buildToken(t))
+    val lexErrors: array<AntlrError> = []
+    for (e in lexer.errors) lexErrors.append(AntlrError(e.line, e.column, e.message))
+    AntlrResult(engine.buildNode(root), tokenList, antlrErrorList(engine.errors), lexErrors)
+}
+
+fun escapeWhitespace(s: string): string = s.replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+
+// Trees.toStringTree(tree, ruleNames)
+fun antlrTreeText(node: AntlrNode, ruleNames: array<string>): string {
+    var text = ""
+    val token = node.token
+    if (node.kind == nodeRule) text = escapeWhitespace(ruleNames[node.ruleIndex])
+    else if (token != null) text = escapeWhitespace(token.text)
+    if (node.children.size > 0) {
+        var s = "($text"
+        for (child in node.children) s = s + " " + antlrTreeText(child, ruleNames)
+        text = s + ")"
+    }
+    text
+}

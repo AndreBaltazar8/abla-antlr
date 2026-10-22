@@ -1,0 +1,369 @@
+// A parser grammar compiled from its ATN into the operations ANTLR's code
+// generator would have emitted for it: which decisions are LL(1) switches and
+// which call adaptivePredict, where state is set and sync is called, and how
+// left-recursive rules push their contexts. Interpreting these operations
+// behaves like the generated parser, errors and recovery included.
+
+import "atn.ab"
+import "context.ab"
+import "intervalset.ab"
+import "ll1.ab"
+
+val opMatch = 1
+val opMatchSet = 2
+val opWildcard = 3
+val opInvoke = 4
+val opPrecpred = 5
+val opSempred = 6
+val opLl1Alt = 7
+val opAlt = 8
+val opLl1OptSingle = 9
+val opLl1Opt = 10
+val opOpt = 11
+val opLl1Star = 12
+val opStar = 13
+val opLl1Plus = 14
+val opPlus = 15
+val opStopToken = 16
+val opLrPush = 17
+
+// op flags
+val flagOuter = 1
+val flagLrPrimary = 2
+val flagInvert = 4
+
+class Program(
+    var kind: array<int>,
+    var state: array<int>,
+    var a: array<int>,
+    var b: array<int>,
+    var flags: array<int>,
+    var decision: array<int>,
+    var loopBack: array<int>,
+    var enterValue: array<int>,
+    var exitValue: array<int>,
+    var altSeqs: array<array<int>>,
+    var altValues: array<array<int>>,
+    var altLooks: array<array<IntervalSet>>,
+    var altNumbers: array<array<int>>,
+    var seqs: array<array<int>>
+) {
+    fun op(k: int, s: int, va: int, vb: int): int {
+        val id = kind.size
+        kind.append(k)
+        state.append(s)
+        a.append(va)
+        b.append(vb)
+        flags.append(0)
+        decision.append(-1)
+        loopBack.append(-1)
+        enterValue.append(0)
+        exitValue.append(0)
+        altSeqs.append([])
+        altValues.append([])
+        altLooks.append([])
+        altNumbers.append([])
+        id
+    }
+
+    fun seq(ops: array<int>): int {
+        val id = seqs.size
+        val copy: array<int> = []
+        for (o in ops) copy.append(o)
+        seqs.append(copy)
+        id
+    }
+}
+
+fun program(): Program = Program([], [], [], [], [], [], [], [], [], [], [], [], [], [])
+
+class ParserGrammar(
+    val atn: Atn,
+    val ruleNames: array<string>,
+    val literalNames: array<string?>,
+    val symbolicNames: array<string?>,
+    val nextTokens: array<IntervalSet>,
+    val decisionLooks: array<array<IntervalSet?>>,
+    val decisionLl1: array<bool>,
+    val prog: Program,
+    val ruleBody: array<int>,
+    val ruleLr: array<bool>,
+    val ruleSingleAlt: array<bool>,
+    val rulePrimaryAlt: array<int>,
+    val error: string
+) {
+    fun ruleIndex(name: string): int {
+        var found = -1
+        for (i in 0 until ruleNames.size) if (found < 0 && ruleNames[i] == name) found = i
+        found
+    }
+}
+
+class ProgramBuilder(val atn: Atn, val looks: array<array<IntervalSet?>>, val ll1: array<bool>, var stopAtEntry: int, var lastPrimaryAlt: int)
+
+fun copyLook(look: IntervalSet?): IntervalSet {
+    val result = intervalSet()
+    if (look != null) result.addSet(look)
+    result
+}
+
+fun nextOf(atn: Atn, s: int): int = atn.transTarget[atn.stateTrans[s][0]]
+
+fun ProgramBuilder.choice(var prog: Program, blockStart: int, flags: int): int {
+    val d = atn.decision[blockStart]
+    val end = atn.endState[blockStart]
+    val trans = atn.stateTrans[blockStart]
+    var bypass = -1
+    for (i in 0 until trans.size) if (atn.transTarget[trans[i]] == end) bypass = i
+    val optional = bypass >= 0
+    val isLl1 = ll1[d]
+    var count = 0
+    for (i in 0 until trans.size) if (i != bypass) count += 1
+    var kind = 0
+    if (optional) {
+        kind = if (isLl1) (if (count == 1) opLl1OptSingle else opLl1Opt) else opOpt
+    } else kind = if (isLl1) opLl1Alt else opAlt
+    val id = prog.op(kind, blockStart, 0, 0)
+    prog.flags[id] = flags
+    prog.decision[id] = d
+    for (i in 0 until trans.size) {
+        if (i != bypass) {
+            val body = buildSeq(prog, atn.transTarget[trans[i]], end)
+            prog.altSeqs[id].append(body)
+            prog.altValues[id].append(i + 1)
+            prog.altLooks[id].append(copyLook(looks[d][i]))
+        }
+    }
+    id
+}
+
+// the block inside a loop: a nested choice when it has several alternatives
+fun ProgramBuilder.loopBody(var prog: Program, blockStart: int): int {
+    var body = 0
+    if (atn.stateTrans[blockStart].size > 1) {
+        val inner = choice(prog, blockStart, 0)
+        body = prog.seq([inner])
+    } else body = buildSeq(prog, nextOf(atn, blockStart), atn.endState[blockStart])
+    body
+}
+
+fun ProgramBuilder.buildSeq(var prog: Program, from: int, stop: int): int {
+    val ops: array<int> = []
+    var s = from
+    var going = true
+    while (going) {
+        val k = atn.stateType[s]
+        if (s == stop || k == stRuleStop || s == stopAtEntry) going = false
+        else if (k == stBlockStart) {
+            ops.append(choice(prog, s, 0))
+            s = nextOf(atn, atn.endState[s])
+        } else if (k == stStarLoopEntry) {
+            val trans = atn.stateTrans[s]
+            var blockIndex = 0
+            if (atn.stateType[atn.transTarget[trans[0]]] != stStarBlockStart) blockIndex = 1
+            val blockStart = atn.transTarget[trans[blockIndex]]
+            val loopEnd = atn.transTarget[trans[1 - blockIndex]]
+            val d = atn.decision[s]
+            val body = loopBody(prog, blockStart)
+            val id = prog.op(if (ll1[d]) opLl1Star else opStar, s, 0, 0)
+            prog.decision[id] = d
+            prog.loopBack[id] = atn.loopBackState[s]
+            prog.enterValue[id] = blockIndex + 1
+            prog.exitValue[id] = 2 - blockIndex
+            prog.altSeqs[id].append(body)
+            prog.altLooks[id].append(copyLook(looks[d][0]))
+            ops.append(id)
+            s = nextOf(atn, loopEnd)
+        } else if (k == stPlusBlockStart) {
+            val loopBackState = atn.loopBackState[s]
+            val trans = atn.stateTrans[loopBackState]
+            var blockIndex = 0
+            if (atn.transTarget[trans[0]] != s) blockIndex = 1
+            val loopEnd = atn.transTarget[trans[1 - blockIndex]]
+            val d = atn.decision[loopBackState]
+            val body = loopBody(prog, s)
+            val id = prog.op(if (ll1[d]) opLl1Plus else opPlus, s, 0, 0)
+            prog.decision[id] = d
+            prog.loopBack[id] = loopBackState
+            prog.enterValue[id] = blockIndex + 1
+            prog.exitValue[id] = 2 - blockIndex
+            prog.altSeqs[id].append(body)
+            prog.altLooks[id].append(copyLook(looks[d][0]))
+            ops.append(id)
+            s = nextOf(atn, loopEnd)
+        } else {
+            val t = atn.stateTrans[s][0]
+            val tk = atn.transType[t]
+            if (tk == trAtom) {
+                ops.append(prog.op(opMatch, s, atn.transA[t], 0))
+                s = atn.transTarget[t]
+            } else if (tk == trSet || tk == trRange || tk == trNotSet) {
+                val id = prog.op(opMatchSet, s, t, 0)
+                if (tk == trNotSet) prog.flags[id] = flagInvert
+                ops.append(id)
+                s = atn.transTarget[t]
+            } else if (tk == trWildcard) {
+                ops.append(prog.op(opWildcard, s, 0, 0))
+                s = atn.transTarget[t]
+            } else if (tk == trRule) {
+                ops.append(prog.op(opInvoke, s, atn.stateRule[atn.transTarget[t]], atn.transB[t]))
+                s = atn.transFollow[t]
+            } else if (tk == trPrecedence) {
+                ops.append(prog.op(opPrecpred, s, atn.transA[t], 0))
+                s = atn.transTarget[t]
+            } else if (tk == trPredicate) {
+                ops.append(prog.op(opSempred, s, atn.transA[t], atn.transB[t]))
+                s = atn.transTarget[t]
+            } else s = atn.transTarget[t]
+        }
+    }
+    prog.seq(ops)
+}
+
+fun firstPrecedence(prog: Program, seq: int): int {
+    var p = -1
+    for (o in prog.seqs[seq]) if (p < 0 && prog.kind[o] == opPrecpred) p = prog.a[o]
+    p
+}
+
+// The left-recursive rule shape: primary alternatives, the stop token action,
+// then a loop of operator alternatives that each push a recursion context.
+fun ProgramBuilder.buildLeftRecursive(var prog: Program, rule: int, entry: int): int {
+    val start = atn.ruleToStart[rule]
+    val first = nextOf(atn, start)
+    stopAtEntry = entry
+    val ops: array<int> = []
+    var primaryOp = -1
+    var primarySeq = -1
+    if (atn.stateType[first] == stBlockStart && nextOf(atn, atn.endState[first]) == entry) {
+        primaryOp = choice(prog, first, flagLrPrimary)
+        ops.append(primaryOp)
+    } else {
+        primarySeq = buildSeq(prog, first, entry)
+        for (o in prog.seqs[primarySeq]) ops.append(o)
+    }
+    stopAtEntry = -1
+    ops.append(prog.op(opStopToken, entry, 0, 0))
+    val trans = atn.stateTrans[entry]
+    val blockStart = atn.transTarget[trans[0]]
+    val loopEnd = atn.transTarget[trans[1]]
+    val opSeqs: array<int> = []
+    var innerChoice = -1
+    if (atn.stateTrans[blockStart].size > 1) {
+        innerChoice = choice(prog, blockStart, 0)
+        for (sq in prog.altSeqs[innerChoice]) opSeqs.append(sq)
+    } else opSeqs.append(buildSeq(prog, nextOf(atn, blockStart), atn.endState[blockStart]))
+    // original alternative numbers: an operator alternative's precedence is
+    // numAlts - alt + 1, and primaries fill the remaining numbers in order
+    val primaryCount = if (primaryOp >= 0) prog.altSeqs[primaryOp].size else 1
+    val total = primaryCount + opSeqs.size
+    val taken = filledArray(total + 2, false)
+    val opNumbers: array<int> = []
+    for (i in 0 until opSeqs.size) {
+        val p = firstPrecedence(prog, opSeqs[i])
+        var n = total - p + 1
+        if (p < 0 || n < 1 || n > total || taken[n]) n = 0
+        if (n > 0) taken[n] = true
+        opNumbers.append(n)
+    }
+    val primaryNumbers: array<int> = []
+    var next = 1
+    for (i in 0 until primaryCount) {
+        while (next <= total && taken[next]) next += 1
+        primaryNumbers.append(next)
+        next += 1
+    }
+    if (primaryOp >= 0) {
+        for (n in primaryNumbers) prog.altNumbers[primaryOp].append(n)
+    }
+    for (i in 0 until opSeqs.size) {
+        val push = prog.op(opLrPush, -1, opNumbers[i], 0)
+        val withPush: array<int> = [push]
+        for (o in prog.seqs[opSeqs[i]]) withPush.append(o)
+        prog.seqs[opSeqs[i]].clear()
+        for (o in withPush) prog.seqs[opSeqs[i]].append(o)
+    }
+    val body = if (innerChoice >= 0) prog.seq([innerChoice]) else opSeqs[0]
+    val star = prog.op(opStar, entry, 0, 0)
+    prog.decision[star] = atn.decision[entry]
+    prog.loopBack[star] = atn.loopBackState[entry]
+    prog.enterValue[star] = 1
+    prog.exitValue[star] = 2
+    prog.altSeqs[star].append(body)
+    prog.altLooks[star].append(intervalSet())
+    ops.append(star)
+    lastPrimaryAlt = if (primaryOp < 0) primaryNumbers[0] else 0
+    prog.seq(ops)
+}
+
+fun copyNames(xs: array<string?>): array<string?> {
+    val result: array<string?> = []
+    for (x in xs) result.append(x)
+    result
+}
+
+fun copyStrings(xs: array<string>): array<string> {
+    val result: array<string> = []
+    for (x in xs) result.append(x)
+    result
+}
+
+fun compileParserGrammar(text: string): ParserGrammar {
+    val interp = parseInterp(text)
+    val atn = deserializeAtn(interp.atnValues)
+    var error = "${atn.error}"
+    if (error.size == 0 && atn.grammarType != atnParser) error = "not a parser ATN"
+    if (error.size > 0) return ParserGrammar(atn, [], [], [], [], [], [], program(), [], [], [], [], error)
+    val pool = contextPool()
+    val nextTokens: array<IntervalSet> = []
+    for (s in 0 until atn.stateCount()) nextTokens.append(lookahead(atn, pool, s, -1, ctxNull))
+    val looks: array<array<IntervalSet?>> = []
+    val ll1: array<bool> = []
+    for (d in 0 until atn.decisionToState.size) {
+        val s = atn.decisionToState[d]
+        val la = decisionLookahead(atn, pool, s)
+        looks.append(la)
+        ll1.append(!atn.nonGreedy[s] && disjointLookahead(la))
+    }
+    val prog = program()
+    val b = ProgramBuilder(atn, looks, ll1, -1, 0)
+    val ruleBody: array<int> = []
+    val ruleLr: array<bool> = []
+    val ruleSingleAlt: array<bool> = []
+    val rulePrimaryAlt: array<int> = []
+    for (r in 0 until atn.ruleToStart.size) {
+        val start = atn.ruleToStart[r]
+        var entry = -1
+        if (atn.precedenceRule[start]) {
+            for (s in 0 until atn.stateCount()) if (atn.stateRule[s] == r && atn.precedenceDecision[s]) entry = s
+        }
+        if (entry >= 0) {
+            ruleBody.append(b.buildLeftRecursive(prog, r, entry))
+            ruleLr.append(true)
+            ruleSingleAlt.append(true)
+            rulePrimaryAlt.append(b.lastPrimaryAlt)
+        } else {
+            val first = nextOf(atn, start)
+            val stop = atn.ruleToStop[r]
+            var outer = false
+            if (atn.stateType[first] == stBlockStart) {
+                val end = atn.endState[first]
+                var bypass = false
+                for (t in atn.stateTrans[first]) if (atn.transTarget[t] == end) bypass = true
+                outer = !bypass && nextOf(atn, end) == stop
+            }
+            if (outer) {
+                val c = b.choice(prog, first, flagOuter)
+                ruleBody.append(prog.seq([c]))
+                ruleSingleAlt.append(false)
+            } else {
+                ruleBody.append(b.buildSeq(prog, first, stop))
+                ruleSingleAlt.append(true)
+            }
+            ruleLr.append(false)
+            rulePrimaryAlt.append(0)
+        }
+    }
+    ParserGrammar(atn, copyStrings(interp.ruleNames), copyNames(interp.literalNames), copyNames(interp.symbolicNames), nextTokens, looks, ll1,
+        prog, ruleBody, ruleLr, ruleSingleAlt, rulePrimaryAlt, "")
+}

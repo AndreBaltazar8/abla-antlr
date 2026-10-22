@@ -8,9 +8,8 @@ fun esc(s: string): string = s.replace("\\", "\\\\").replace("\n", "\\n").replac
 
 fun main: int {
     val interp = parseInterp(path(processArgument(0)).readText())
-    val load = deserializeAtn(interp.atnValues)
-    val atn = load.atn
-    if (atn == null) return 1
+    val atn = deserializeAtn(interp.atnValues)
+    if (atn.error.size > 0) return 1
     val dfas: array<Dfa> = []
     for (m in 0 until atn.modeToStart.size) dfas.append(dfaFor(atn.modeToStart[m], m, false))
     val src = path(processArgument(1)).readText()

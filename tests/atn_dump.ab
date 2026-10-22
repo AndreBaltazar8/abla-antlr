@@ -5,10 +5,9 @@ import "../src/atn.ab"
 
 fun main: int {
     val interp = parseInterp(path(processArgument(0)).readText())
-    val load = deserializeAtn(interp.atnValues)
-    val atn = load.atn
-    if (atn == null) {
-        println(load.error)
+    val atn = deserializeAtn(interp.atnValues)
+    if (atn.error.size > 0) {
+        println(atn.error)
         return 1
     }
     println("type ${atn.grammarType} max ${atn.maxTokenType} states ${atn.stateCount()} decisions ${atn.decisionToState.size}")

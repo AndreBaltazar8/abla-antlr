@@ -1,0 +1,450 @@
+// Runs a ParserGrammar's operations the way generated parser code runs, with
+// DefaultErrorStrategy's reporting and recovery.
+
+import "atn.ab"
+import "context.ab"
+import "configs.ab"
+import "lexer.ab"
+import "grammar.ab"
+import "engine.ab"
+import "predict.ab"
+import "intervalset.ab"
+import "ll1.ab"
+
+fun escapeWsAndQuote(s: string): string = "'" + s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "'"
+
+fun Engine.tokenErrorDisplay(t: int): string = escapeWsAndQuote(tokens.text[t])
+
+fun Engine.endErrorCondition(): void {
+    recovering = false
+    hasLastErrorStates = false
+    lastErrorStates.clear()
+    lastErrorIndex = -1
+}
+
+fun Engine.expectedTokensAt(g: ParserGrammar, s: int, ctx: int): IntervalSet {
+    var following = s
+    val expected = intervalSet()
+    expected.addSet(g.nextTokens[following])
+    if (g.nextTokens[following].contains(tokenEpsilon)) {
+        expected.removeOne(tokenEpsilon)
+        var c = ctx
+        while (c >= 0 && ctxInvoking[c] >= 0 && g.nextTokens[following].contains(tokenEpsilon)) {
+            val rt = g.atn.stateTrans[ctxInvoking[c]][0]
+            following = g.atn.transFollow[rt]
+            expected.addSet(g.nextTokens[following])
+            expected.removeOne(tokenEpsilon)
+            c = ctxParent[c]
+        }
+        if (g.nextTokens[following].contains(tokenEpsilon)) expected.addOne(tokenEof)
+    }
+    expected
+}
+
+fun Engine.expectedTokens(g: ParserGrammar): IntervalSet = expectedTokensAt(g, state, cur)
+
+fun Engine.errorRecoverySet(g: ParserGrammar): IntervalSet {
+    val set = intervalSet()
+    var c = cur
+    while (c >= 0 && ctxInvoking[c] >= 0) {
+        val rt = g.atn.stateTrans[ctxInvoking[c]][0]
+        set.addSet(g.nextTokens[g.atn.transFollow[rt]])
+        c = ctxParent[c]
+    }
+    set.removeOne(tokenEpsilon)
+    set
+}
+
+fun Engine.parserConsume(): int {
+    val o = lt(1)
+    if (tokens.type[o] != tokenEof) streamConsume()
+    addTokenNode(o, recovering)
+    o
+}
+
+fun Engine.consumeUntil(set: IntervalSet): void {
+    var ttype = la(1)
+    while (ttype != tokenEof && !set.contains(ttype)) {
+        parserConsume()
+        ttype = la(1)
+    }
+}
+
+fun Engine.reportUnwantedToken(g: ParserGrammar): void {
+    if (recovering) return
+    recovering = true
+    val t = lt(1)
+    val expecting = expectedTokens(g)
+    notify("extraneous input ${tokenErrorDisplay(t)} expecting ${expecting.toTokenString(g.literalNames, g.symbolicNames)}", t)
+}
+
+fun Engine.reportMissingToken(g: ParserGrammar): void {
+    if (recovering) return
+    recovering = true
+    val t = lt(1)
+    val expecting = expectedTokens(g)
+    notify("missing ${expecting.toTokenString(g.literalNames, g.symbolicNames)} at ${tokenErrorDisplay(t)}", t)
+}
+
+fun Engine.singleTokenDeletion(g: ParserGrammar): int {
+    var result = -1
+    val nextType = la(2)
+    val expecting = expectedTokens(g)
+    if (expecting.contains(nextType)) {
+        reportUnwantedToken(g)
+        parserConsume()
+        result = lt(1)
+        endErrorCondition()
+    }
+    result
+}
+
+fun Engine.singleTokenInsertion(g: ParserGrammar): bool {
+    val currentType = la(1)
+    val next = g.atn.transTarget[g.atn.stateTrans[state][0]]
+    val ctx = predictionContextFrom(g, cur)
+    val expectingAtLl2 = lookahead(g.atn, contexts, next, -1, ctx)
+    var result = false
+    if (expectingAtLl2.contains(currentType)) {
+        reportMissingToken(g)
+        result = true
+    }
+    result
+}
+
+fun literalNameText(g: ParserGrammar, t: int): string {
+    var text = "undefined"
+    if (t >= 0 && t < g.literalNames.size) {
+        val name = g.literalNames[t]
+        text = if (name == null) "null" else name
+    }
+    text
+}
+
+fun Engine.missingSymbol(g: ParserGrammar): int {
+    var current = lt(1)
+    val expected = expectedTokens(g).first()
+    val text = if (expected == tokenEof) "<missing EOF>" else "<missing ${literalNameText(g, expected)}>"
+    val lookback = lt(-1)
+    if (tokens.type[current] == tokenEof && lookback >= 0) current = lookback
+    tokens.add(expected, defaultChannel, -1, -1, tokens.line[current], tokens.column[current], text, -1)
+}
+
+// Returns the matched or conjured token, or -1 with exc set.
+fun Engine.recoverInline(g: ParserGrammar): int {
+    var result = singleTokenDeletion(g)
+    if (result >= 0) parserConsume()
+    else if (singleTokenInsertion(g)) result = missingSymbol(g)
+    else {
+        throwInputMismatch()
+        result = -1
+    }
+    result
+}
+
+fun Engine.match(g: ParserGrammar, ttype: int): bool {
+    var ok = true
+    val t = lt(1)
+    if (tokens.type[t] == ttype) {
+        endErrorCondition()
+        parserConsume()
+    } else {
+        val r = recoverInline(g)
+        if (r < 0) ok = false
+        else if (tokens.tokenIndex[r] == -1) addTokenNode(r, true)
+    }
+    ok
+}
+
+fun Engine.sync(g: ParserGrammar): bool {
+    if (recovering) return true
+    val s = state
+    val la1 = la(1)
+    val next = g.nextTokens[s]
+    if (next.contains(la1) || next.contains(tokenEpsilon)) return true
+    val k = g.atn.stateType[s]
+    var ok = true
+    if (k == stBlockStart || k == stStarBlockStart || k == stPlusBlockStart || k == stStarLoopEntry) {
+        if (singleTokenDeletion(g) < 0) ok = throwInputMismatch()
+    } else if (k == stPlusLoopBack || k == stStarLoopBack) {
+        reportUnwantedToken(g)
+        val expecting = intervalSet()
+        expecting.addSet(expectedTokens(g))
+        expecting.addSet(errorRecoverySet(g))
+        consumeUntil(expecting)
+    }
+    ok
+}
+
+fun Engine.tokenRangeText(start: int, stop: int): string {
+    var s = ""
+    if (start >= 0 && stop >= 0) {
+        var e = stop
+        if (e >= streamCount) e = streamCount - 1
+        var i = start
+        var going = true
+        while (going && i <= e) {
+            if (tokens.type[i] == tokenEof) going = false
+            else {
+                s = s + tokens.text[i]
+                i += 1
+            }
+        }
+    }
+    s
+}
+
+fun Engine.reportError(g: ParserGrammar): void {
+    if (recovering) return
+    recovering = true
+    if (exc == excNoViableAlt) {
+        val input = if (tokens.type[excStart] == tokenEof) "<EOF>" else tokenRangeText(tokens.tokenIndex[excStart], tokens.tokenIndex[excOffending])
+        notify("no viable alternative at input ${escapeWsAndQuote(input)}", excOffending)
+    } else if (exc == excInputMismatch) {
+        val expecting = expectedTokensAt(g, excState, excCtx)
+        notify("mismatched input ${tokenErrorDisplay(excOffending)} expecting ${expecting.toTokenString(g.literalNames, g.symbolicNames)}", excOffending)
+    } else if (exc == excFailedPredicate) {
+        notify("rule ${g.ruleNames[ctxRule[cur]]} $excMessage", excOffending)
+    }
+}
+
+fun Engine.recover(g: ParserGrammar): void {
+    if (lastErrorIndex == index && hasLastErrorStates && lastErrorStates.contains(state)) parserConsume()
+    lastErrorIndex = index
+    hasLastErrorStates = true
+    lastErrorStates.append(state)
+    consumeUntil(errorRecoverySet(g))
+}
+
+fun Engine.handleRecognitionError(g: ParserGrammar): void {
+    reportError(g)
+    recover(g)
+    exc = excNone
+}
+
+fun findAlt(prog: Program, op: int, value: int): int {
+    var found = -1
+    for (i in 0 until prog.altValues[op].size) if (found < 0 && prog.altValues[op][i] == value) found = i
+    found
+}
+
+fun findLookAlt(prog: Program, op: int, ttype: int): int {
+    var found = -1
+    for (i in 0 until prog.altLooks[op].size) {
+        if (found < 0 && prog.altLooks[op][i].contains(ttype)) found = i
+    }
+    found
+}
+
+fun lookContains(prog: Program, op: int, ttype: int): bool = prog.altLooks[op][0].contains(ttype)
+
+fun Engine.enterAlt(prog: Program, op: int, i: int): void {
+    if ((prog.flags[op] & flagOuter) != 0) ctxAlt[cur] = prog.altValues[op][i]
+    else if ((prog.flags[op] & flagLrPrimary) != 0) ctxAlt[cur] = prog.altNumbers[op][i]
+}
+
+fun Engine.execSeq(g: ParserGrammar, seq: int): bool {
+    var ok = true
+    val n = g.prog.seqs[seq].size
+    var i = 0
+    while (ok && i < n) {
+        ok = execOp(g, g.prog.seqs[seq][i])
+        i += 1
+    }
+    ok
+}
+
+fun Engine.execOp(g: ParserGrammar, op: int): bool {
+    val prog = g.prog
+    val k = prog.kind[op]
+    var ok = true
+    if (k == opMatch) {
+        state = prog.state[op]
+        ok = match(g, prog.a[op])
+    } else if (k == opMatchSet) {
+        state = prog.state[op]
+        val la1 = la(1)
+        val label = g.atn.transLabel[prog.a[op]]
+        val inSet = label != null && label.contains(la1)
+        val fails = if ((prog.flags[op] & flagInvert) != 0) la1 <= 0 || inSet else !inSet
+        if (fails) {
+            if (recoverInline(g) < 0) ok = false
+        } else {
+            endErrorCondition()
+            parserConsume()
+        }
+    } else if (k == opWildcard) {
+        state = prog.state[op]
+        if (la(1) > 0) {
+            endErrorCondition()
+            parserConsume()
+        } else if (recoverInline(g) < 0) ok = false
+    } else if (k == opInvoke) {
+        state = prog.state[op]
+        invokeRule(g, prog.a[op], prog.b[op])
+    } else if (k == opPrecpred) {
+        state = prog.state[op]
+        if (!precpred(prog.a[op])) ok = throwFailedPredicate("failed predicate: {this.precpred(this._ctx, ${prog.a[op]})}?")
+    } else if (k == opSempred) {
+        state = prog.state[op]
+    } else if (k == opLl1Alt) {
+        state = prog.state[op]
+        ok = sync(g)
+        if (ok) {
+            val i = findLookAlt(prog, op, la(1))
+            if (i < 0) ok = throwNoViableAlt(lt(1), lt(1), cur)
+            else {
+                enterAlt(prog, op, i)
+                ok = execSeq(g, prog.altSeqs[op][i])
+            }
+        }
+    } else if (k == opAlt) {
+        state = prog.state[op]
+        ok = sync(g)
+        if (ok) {
+            val v = adaptivePredict(g, prog.decision[op], cur)
+            if (exc != excNone) ok = false
+            else {
+                val i = findAlt(prog, op, v)
+                if (i >= 0) {
+                    enterAlt(prog, op, i)
+                    ok = execSeq(g, prog.altSeqs[op][i])
+                }
+            }
+        }
+    } else if (k == opLl1OptSingle || k == opLl1Opt) {
+        state = prog.state[op]
+        ok = sync(g)
+        if (ok) {
+            val i = findLookAlt(prog, op, la(1))
+            if (i >= 0) ok = execSeq(g, prog.altSeqs[op][i])
+        }
+    } else if (k == opOpt) {
+        state = prog.state[op]
+        ok = sync(g)
+        if (ok) {
+            val v = adaptivePredict(g, prog.decision[op], cur)
+            if (exc != excNone) ok = false
+            else {
+                val i = findAlt(prog, op, v)
+                if (i >= 0) ok = execSeq(g, prog.altSeqs[op][i])
+            }
+        }
+    } else if (k == opLl1Star) {
+        state = prog.state[op]
+        ok = sync(g)
+        while (ok && lookContains(prog, op, la(1))) {
+            ok = execSeq(g, prog.altSeqs[op][0])
+            if (ok) {
+                state = prog.loopBack[op]
+                ok = sync(g)
+            }
+        }
+    } else if (k == opStar) {
+        state = prog.state[op]
+        ok = sync(g)
+        var alt = 0
+        if (ok) {
+            alt = adaptivePredict(g, prog.decision[op], cur)
+            if (exc != excNone) ok = false
+        }
+        while (ok && alt != prog.exitValue[op] && alt != 0) {
+            if (alt == prog.enterValue[op]) ok = execSeq(g, prog.altSeqs[op][0])
+            if (ok) {
+                state = prog.loopBack[op]
+                ok = sync(g)
+            }
+            if (ok) {
+                alt = adaptivePredict(g, prog.decision[op], cur)
+                if (exc != excNone) ok = false
+            }
+        }
+    } else if (k == opLl1Plus) {
+        state = prog.state[op]
+        ok = sync(g)
+        var again = ok
+        while (again) {
+            ok = execSeq(g, prog.altSeqs[op][0])
+            if (ok) {
+                state = prog.loopBack[op]
+                ok = sync(g)
+            }
+            again = ok && lookContains(prog, op, la(1))
+        }
+    } else if (k == opPlus) {
+        state = prog.state[op]
+        ok = sync(g)
+        var alt = prog.enterValue[op]
+        var again = ok
+        while (again) {
+            if (alt == prog.enterValue[op]) ok = execSeq(g, prog.altSeqs[op][0])
+            else ok = throwNoViableAlt(lt(1), lt(1), cur)
+            if (ok) {
+                state = prog.loopBack[op]
+                ok = sync(g)
+            }
+            if (ok) {
+                alt = adaptivePredict(g, prog.decision[op], cur)
+                if (exc != excNone) ok = false
+            }
+            again = ok && alt != prog.exitValue[op] && alt != 0
+        }
+    } else if (k == opStopToken) {
+        ctxStop[cur] = lt(-1)
+    } else if (k == opLrPush) {
+        val top = frameParent.size - 1
+        val localctx = newContext(ctxRule[cur], frameParent[top], frameParentState[top])
+        ctxAlt[localctx] = prog.a[op]
+        val previous = cur
+        ctxParent[previous] = localctx
+        ctxInvoking[previous] = frameStart[top]
+        ctxStop[previous] = lt(-1)
+        cur = localctx
+        ctxStart[cur] = ctxStart[previous]
+        addChild(cur, previous)
+    }
+    ok
+}
+
+fun Engine.invokeRule(g: ParserGrammar, rule: int, prec: int): int {
+    val start = g.atn.ruleToStart[rule]
+    var result = 0
+    if (!g.ruleLr[rule]) {
+        val localctx = newContext(rule, cur, state)
+        state = start
+        val parent = cur
+        cur = localctx
+        ctxStart[localctx] = lt(1)
+        if (parent >= 0) addChild(parent, localctx)
+        if (g.ruleSingleAlt[rule]) ctxAlt[localctx] = 1
+        if (!execSeq(g, g.ruleBody[rule])) handleRecognitionError(g)
+        ctxStop[cur] = lt(-1)
+        state = ctxInvoking[cur]
+        cur = ctxParent[cur]
+        result = localctx
+    } else {
+        val parentctx = cur
+        val parentState = state
+        val localctx = newContext(rule, cur, parentState)
+        state = start
+        precStack.append(prec)
+        cur = localctx
+        ctxStart[localctx] = lt(1)
+        ctxAlt[localctx] = g.rulePrimaryAlt[rule]
+        frameParent.append(parentctx)
+        frameParentState.append(parentState)
+        frameStart.append(start)
+        if (!execSeq(g, g.ruleBody[rule])) handleRecognitionError(g)
+        precStack.truncate(precStack.size - 1)
+        ctxStop[cur] = lt(-1)
+        val retCtx = cur
+        cur = parentctx
+        ctxParent[retCtx] = parentctx
+        if (parentctx >= 0) addChild(parentctx, retCtx)
+        frameParent.truncate(frameParent.size - 1)
+        frameParentState.truncate(frameParentState.size - 1)
+        frameStart.truncate(frameStart.size - 1)
+        result = retCtx
+    }
+    result
+}

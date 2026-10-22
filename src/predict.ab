@@ -1,0 +1,696 @@
+// ParserATNSimulator: adaptive LL(*) prediction, SLL with a DFA cache first,
+// full-context LL when SLL reports a conflict.
+
+import "atn.ab"
+import "context.ab"
+import "semantic.ab"
+import "configs.ab"
+import "grammar.ab"
+import "engine.ab"
+import "intervalset.ab"
+
+fun Engine.addConfig(var set: ConfigSet, c: int, useCache: bool): void {
+    if (configs.sem[c] != semNone) set.hasSemanticContext = true
+    if (configs.reach[c] > 0) set.dipsIntoOuterContext = true
+    val key = configs.parserKey(c)
+    val existing = set.lookup.get(key)
+    if (existing == null) {
+        set.lookup.set(key, c)
+        set.items.append(c)
+    } else {
+        val e = existing
+        val cacheWas = contexts.mergeCacheOn
+        if (!useCache) contexts.mergeCacheOn = false
+        val merged = contexts.merge(configs.ctx[e], configs.ctx[c], !set.fullCtx)
+        contexts.mergeCacheOn = cacheWas
+        if (configs.reach[c] > configs.reach[e]) configs.reach[e] = configs.reach[c]
+        if (configs.suppressed[c] == pfsTrue) configs.suppressed[e] = pfsTrue
+        configs.ctx[e] = merged
+    }
+}
+
+fun Engine.fullKey(c: int): string = "${configs.state[c]},${configs.alt[c]},${configs.ctx[c]},${configs.sem[c]},${configs.suppressed[c]}"
+
+fun Engine.setKey(set: ConfigSet): string {
+    var key = "${if (set.fullCtx) 1 else 0}|${set.uniqueAlt}|${set.conflictId}|${if (set.hasSemanticContext) 1 else 0}|${if (set.dipsIntoOuterContext) 1 else 0}|"
+    for (c in set.items) key = key + fullKey(c) + ";"
+    key
+}
+
+fun Engine.addDfaState(d: int, var st: DfaState): int {
+    val key = setKey(st.configs)
+    var result = 0
+    val found = dfas[d].lookup.get(key)
+    if (found != null) result = found
+    else {
+        st.configs.readOnly = true
+        result = dfas[d].states.size
+        dfas[d].states.append(st)
+        dfas[d].lookup.set(key, result)
+    }
+    result
+}
+
+fun Engine.setDfaEdge(g: ParserGrammar, d: int, from: int, t: int, to: int): void {
+    if (t >= -1 && t <= g.atn.maxTokenType) {
+        if (dfas[d].states[from].edges.size == 0) dfas[d].states[from].edges = filledArray(g.atn.maxTokenType + 2, dfaNone)
+        dfas[d].states[from].edges[t + 1] = to
+    }
+}
+
+fun Engine.existingTarget(d: int, s: int, t: int): int {
+    var result = dfaNone
+    val n = dfas[d].states[s].edges.size
+    if (n > 0 && t + 1 >= 0 && t + 1 < n) result = dfas[d].states[s].edges[t + 1]
+    result
+}
+
+fun Engine.predictionContextFrom(g: ParserGrammar, ctx: int): int {
+    var result = ctxEmpty
+    if (ctx >= 0 && ctxParent[ctx] >= 0) {
+        val parent = predictionContextFrom(g, ctxParent[ctx])
+        val t = g.atn.stateTrans[ctxInvoking[ctx]][0]
+        result = contexts.singleton(parent, g.atn.transFollow[t])
+    }
+    result
+}
+
+fun Engine.evaluate(s: int): bool {
+    val k = sems.kind[s]
+    var result = true
+    if (k == skPrecedence) result = precpred(sems.a[s])
+    else if (k == skAnd) {
+        for (o in sems.operands(s)) if (result && !evaluate(o)) result = false
+    } else if (k == skOr) {
+        result = false
+        for (o in sems.operands(s)) if (!result && evaluate(o)) result = true
+    }
+    result
+}
+
+// SemanticContext.evalPrecedence; semNull when the context is false.
+fun Engine.evalPrecedence(s: int): int {
+    val k = sems.kind[s]
+    var result = s
+    if (k == skPrecedence) result = if (precpred(sems.a[s])) semNone else semNull
+    else if (k == skAnd) {
+        var differs = false
+        var dead = false
+        val ops: array<int> = []
+        for (o in sems.operands(s)) {
+            if (!dead) {
+                val ev = evalPrecedence(o)
+                if (ev != o) differs = true
+                if (ev == semNull) dead = true
+                else if (ev != semNone) ops.append(ev)
+            }
+        }
+        if (dead) result = semNull
+        else if (!differs) result = s
+        else if (ops.size == 0) result = semNone
+        else {
+            var r = semNull
+            for (o in ops) r = if (r == semNull) o else sems.andContext(r, o)
+            result = r
+        }
+    } else if (k == skOr) {
+        var differs = false
+        var none = false
+        var count = 0
+        for (o in sems.operands(s)) {
+            if (!none) {
+                val ev = evalPrecedence(o)
+                if (ev != o) differs = true
+                if (ev == semNone) none = true
+                else if (ev != semNull) count += 1
+            }
+        }
+        // the JavaScript runtime returns null whenever an operand changed
+        result = if (none) semNone else if (!differs) s else semNull
+    }
+    result
+}
+
+fun Engine.uniqueAlt(set: ConfigSet): int {
+    var alt = 0
+    var mixed = false
+    for (c in set.items) {
+        if (alt == 0) alt = configs.alt[c]
+        else if (configs.alt[c] != alt) mixed = true
+    }
+    if (mixed) 0 else alt
+}
+
+fun Engine.conflictingAltSubsets(set: ConfigSet): array<array<int>> {
+    val groups: array<array<int>> = []
+    val groupOf: Map<int, int> = Map()
+    for (c in set.items) {
+        val key = configs.state[c] * 4294967296 + configs.ctx[c]
+        val found = groupOf.get(key)
+        var g = 0
+        if (found == null) {
+            g = groups.size
+            groups.append([])
+            groupOf.set(key, g)
+        } else g = found
+        val alt = configs.alt[c]
+        if (!groups[g].contains(alt)) groups[g].append(alt)
+    }
+    groups
+}
+
+fun minOf(xs: array<int>): int {
+    var m = 0
+    for (i in 0 until xs.size) if (i == 0 || xs[i] < m) m = xs[i]
+    m
+}
+
+fun Engine.allConfigsInRuleStopStates(g: ParserGrammar, set: ConfigSet): bool {
+    var all = true
+    for (c in set.items) if (g.atn.stateType[configs.state[c]] != stRuleStop) all = false
+    all
+}
+
+fun Engine.hasConfigInRuleStopState(g: ParserGrammar, set: ConfigSet): bool {
+    var any = false
+    for (c in set.items) if (g.atn.stateType[configs.state[c]] == stRuleStop) any = true
+    any
+}
+
+fun Engine.hasStateAssociatedWithOneAlt(set: ConfigSet): bool {
+    val groupOf: Map<int, int> = Map()
+    val groups: array<array<int>> = []
+    for (c in set.items) {
+        val s = configs.state[c]
+        val found = groupOf.get(s)
+        var g = 0
+        if (found == null) {
+            g = groups.size
+            groups.append([])
+            groupOf.set(s, g)
+        } else g = found
+        if (!groups[g].contains(configs.alt[c])) groups[g].append(configs.alt[c])
+    }
+    var one = false
+    for (alts in groups) if (alts.size == 1) one = true
+    one
+}
+
+fun Engine.hasSllConflictTerminatingPrediction(g: ParserGrammar, set: ConfigSet): bool {
+    var result = true
+    if (!allConfigsInRuleStopStates(g, set)) {
+        var conflicting = false
+        for (alts in conflictingAltSubsets(set)) if (alts.size > 1) conflicting = true
+        result = conflicting && !hasStateAssociatedWithOneAlt(set)
+    }
+    result
+}
+
+fun Engine.allAlts(set: ConfigSet): array<int> {
+    val alts: array<int> = []
+    for (c in set.items) if (!alts.contains(configs.alt[c])) alts.append(configs.alt[c])
+    alts
+}
+
+fun Engine.canDropLoopEntryEdge(g: ParserGrammar, c: int): bool {
+    val atn = g.atn
+    val p = configs.state[c]
+    val ctx = configs.ctx[c]
+    if (atn.stateType[p] != stStarLoopEntry) return false
+    if (!atn.precedenceDecision[p] || contexts.isEmpty(ctx) || contexts.hasEmptyPath(ctx)) return false
+    val n = contexts.length(ctx)
+    for (i in 0 until n) {
+        if (atn.stateRule[contexts.getReturnState(ctx, i)] != atn.stateRule[p]) return false
+    }
+    val decisionStart = atn.transTarget[atn.stateTrans[p][0]]
+    val blockEnd = atn.endState[decisionStart]
+    var ok = true
+    for (i in 0 until n) {
+        val rs = contexts.getReturnState(ctx, i)
+        if (ok) {
+            if (atn.stateTrans[rs].size != 1 || !atn.isEpsilonTransition(atn.stateTrans[rs][0])) ok = false
+            else {
+                val target = atn.transTarget[atn.stateTrans[rs][0]]
+                var fine = false
+                if (atn.stateType[rs] == stBlockEnd && target == p) fine = true
+                else if (rs == blockEnd) fine = true
+                else if (target == blockEnd) fine = true
+                else if (atn.stateType[target] == stBlockEnd && atn.stateTrans[target].size == 1 &&
+                    atn.isEpsilonTransition(atn.stateTrans[target][0]) && atn.transTarget[atn.stateTrans[target][0]] == p) fine = true
+                if (!fine) ok = false
+            }
+        }
+    }
+    ok
+}
+
+fun Engine.epsilonTarget(g: ParserGrammar, c: int, t: int, collect: bool, inContext: bool, fullCtx: bool, treatEof: bool): int {
+    val atn = g.atn
+    val k = atn.transType[t]
+    var result = -1
+    if (k == trRule) {
+        val ctx = contexts.singleton(configs.ctx[c], atn.transFollow[t])
+        result = configs.withStateContext(atn.transTarget[t], ctx, c)
+    } else if (k == trPrecedence || k == trPredicate) {
+        val pred = if (k == trPrecedence) sems.precedence(atn.transA[t]) else sems.predicate(atn.transA[t], atn.transB[t], atn.transFlag[t])
+        val applies = if (k == trPrecedence) collect && inContext else collect && ((atn.transFlag[t] && inContext) || !atn.transFlag[t])
+        if (applies) {
+            if (fullCtx) {
+                val current = index
+                seek(predictStart)
+                val ok = evaluate(pred)
+                seek(current)
+                if (ok) result = configs.withState(atn.transTarget[t], c)
+            } else {
+                val sem = sems.andContext(configs.sem[c], pred)
+                result = configs.withStateSemantic(atn.transTarget[t], sem, c)
+            }
+        } else result = configs.withState(atn.transTarget[t], c)
+    } else if (k == trAction || k == trEpsilon) {
+        result = configs.withState(atn.transTarget[t], c)
+    } else if (k == trAtom || k == trRange || k == trSet) {
+        if (treatEof && atn.matches(t, tokenEof, 0, 1)) result = configs.withState(atn.transTarget[t], c)
+    }
+    result
+}
+
+fun Engine.closureCheckingStopState(g: ParserGrammar, c: int, var set: ConfigSet, var busy: Map<string, bool>, collect: bool, fullCtx: bool, depth: int, treatEof: bool): void {
+    val s = configs.state[c]
+    if (g.atn.stateType[s] == stRuleStop) {
+        val ctx = configs.ctx[c]
+        if (!contexts.isEmpty(ctx)) {
+            for (i in 0 until contexts.length(ctx)) {
+                val rs = contexts.getReturnState(ctx, i)
+                if (rs == emptyReturnState) {
+                    if (fullCtx) addConfig(set, configs.withStateContext(s, ctxEmpty, c), true)
+                    else closureInner(g, c, set, busy, collect, fullCtx, depth, treatEof)
+                } else {
+                    val next = configs.make(rs, configs.alt[c], contexts.getParent(ctx, i), configs.sem[c], configs.reach[c], pfsUndefined, -1, false)
+                    closureCheckingStopState(g, next, set, busy, collect, fullCtx, depth - 1, treatEof)
+                }
+            }
+            return
+        } else if (fullCtx) {
+            addConfig(set, c, true)
+            return
+        }
+    }
+    closureInner(g, c, set, busy, collect, fullCtx, depth, treatEof)
+}
+
+fun Engine.closureInner(g: ParserGrammar, c: int, var set: ConfigSet, var busy: Map<string, bool>, collect: bool, fullCtx: bool, depth: int, treatEof: bool): void {
+    val atn = g.atn
+    val p = configs.state[c]
+    if (!atn.epsilonOnly[p]) addConfig(set, c, true)
+    val n = atn.stateTrans[p].size
+    for (i in 0 until n) {
+        val t = atn.stateTrans[p][i]
+        if (!(i == 0 && canDropLoopEntryEdge(g, c))) {
+            val continueCollecting = collect && atn.transType[t] != trAction
+            val next = epsilonTarget(g, c, t, continueCollecting, depth == 0, fullCtx, treatEof)
+            if (next >= 0) {
+                var newDepth = depth
+                var skip = false
+                if (atn.stateType[p] == stRuleStop) {
+                    if (predictDfa >= 0 && dfas[predictDfa].precedenceDfa) {
+                        if (atn.transReturn[t] == atn.stateRule[dfas[predictDfa].atnStartState]) configs.suppressed[next] = pfsTrue
+                    }
+                    configs.reach[next] = configs.reach[next] + 1
+                    val key = fullKey(next)
+                    if (busy.has(key)) skip = true
+                    else {
+                        busy.set(key, true)
+                        set.dipsIntoOuterContext = true
+                        newDepth -= 1
+                    }
+                } else {
+                    if (!atn.isEpsilonTransition(t)) {
+                        val key = fullKey(next)
+                        if (busy.has(key)) skip = true
+                        else busy.set(key, true)
+                    }
+                    if (!skip && atn.transType[t] == trRule && newDepth >= 0) newDepth += 1
+                }
+                if (!skip) closureCheckingStopState(g, next, set, busy, continueCollecting, fullCtx, newDepth, treatEof)
+            }
+        }
+    }
+}
+
+fun Engine.computeStartState(g: ParserGrammar, p: int, outer: int, fullCtx: bool): ConfigSet {
+    val initial = predictionContextFrom(g, outer)
+    val set = configSet(fullCtx)
+    val n = g.atn.stateTrans[p].size
+    for (i in 0 until n) {
+        val target = g.atn.transTarget[g.atn.stateTrans[p][i]]
+        val c = configs.make(target, i + 1, initial, semNone, 0, pfsUndefined, -1, false)
+        val busy: Map<string, bool> = Map()
+        closureCheckingStopState(g, c, set, busy, true, fullCtx, 0, false)
+    }
+    set
+}
+
+fun Engine.applyPrecedenceFilter(set: ConfigSet): ConfigSet {
+    val fromAlt1: Map<int, int> = Map()
+    val result = configSet(set.fullCtx)
+    for (c in set.items) {
+        if (configs.alt[c] == 1) {
+            val updated = evalPrecedence(configs.sem[c])
+            if (updated != semNull) {
+                fromAlt1.set(configs.state[c], configs.ctx[c])
+                if (updated != configs.sem[c]) addConfig(result, configs.withSemantic(updated, c), true)
+                else addConfig(result, c, true)
+            }
+        }
+    }
+    for (c in set.items) {
+        if (configs.alt[c] != 1) {
+            var skip = false
+            if (configs.suppressed[c] != pfsTrue) {
+                val ctx = fromAlt1.get(configs.state[c])
+                if (ctx != null && ctx == configs.ctx[c]) skip = true
+            }
+            if (!skip) addConfig(result, c, true)
+        }
+    }
+    result
+}
+
+fun Engine.removeAllConfigsNotInRuleStopState(g: ParserGrammar, set: ConfigSet, lookToEndOfRule: bool): ConfigSet {
+    val result = configSet(set.fullCtx)
+    for (c in set.items) {
+        val s = configs.state[c]
+        if (g.atn.stateType[s] == stRuleStop) addConfig(result, c, true)
+        else if (lookToEndOfRule && g.atn.epsilonOnly[s]) {
+            if (g.nextTokens[s].contains(tokenEpsilon)) addConfig(result, configs.withState(g.atn.ruleToStop[g.atn.stateRule[s]], c), true)
+        }
+    }
+    result
+}
+
+// An empty result stands for the runtime's null (nothing reachable).
+fun Engine.computeReachSet(g: ParserGrammar, closureItems: array<int>, t: int, fullCtx: bool): ConfigSet {
+    val atn = g.atn
+    if (!contexts.mergeCacheOn) contexts.beginMergeCache()
+    val intermediate = configSet(fullCtx)
+    val skipped: array<int> = []
+    for (c in closureItems) {
+        val s = configs.state[c]
+        if (atn.stateType[s] == stRuleStop) {
+            if (fullCtx || t == tokenEof) skipped.append(c)
+        } else {
+            val n = atn.stateTrans[s].size
+            for (j in 0 until n) {
+                val tr = atn.stateTrans[s][j]
+                if (atn.matches(tr, t, 0, atn.maxTokenType)) addConfig(intermediate, configs.withState(atn.transTarget[tr], c), true)
+            }
+        }
+    }
+    var useIntermediate = false
+    if (skipped.size == 0 && t != tokenEof) {
+        if (intermediate.items.size == 1) useIntermediate = true
+        else if (uniqueAlt(intermediate) != 0) useIntermediate = true
+    }
+    // the reach set is built in `intermediate`'s place
+    if (!useIntermediate) {
+        val closed = configSet(fullCtx)
+        val busy: Map<string, bool> = Map()
+        val treatEof = t == tokenEof
+        for (c in copyInts(intermediate.items)) closureCheckingStopState(g, c, closed, busy, false, fullCtx, 0, treatEof)
+        replaceSet(intermediate, closed)
+    }
+    if (t == tokenEof) {
+        if (!allConfigsInRuleStopStates(g, intermediate)) {
+            val kept = removeAllConfigsNotInRuleStopState(g, intermediate, useIntermediate)
+            replaceSet(intermediate, kept)
+        }
+    }
+    if (skipped.size > 0 && (!fullCtx || !hasConfigInRuleStopState(g, intermediate))) {
+        for (c in skipped) addConfig(intermediate, c, true)
+    }
+    intermediate
+}
+
+fun Engine.replaceSet(var target: ConfigSet, source: ConfigSet): void {
+    target.items.clear()
+    target.lookup.clear()
+    for (c in source.items) {
+        target.items.append(c)
+        target.lookup.set(configs.parserKey(c), c)
+    }
+    target.hasSemanticContext = source.hasSemanticContext
+    target.dipsIntoOuterContext = source.dipsIntoOuterContext
+    target.uniqueAlt = source.uniqueAlt
+    target.conflictId = source.conflictId
+}
+
+fun Engine.predicatesFor(g: ParserGrammar, d: int, var st: DfaState): void {
+    val nalts = g.atn.stateTrans[g.atn.decisionToState[d]].size
+    val ambig: array<int> = []
+    if (st.configs.uniqueAlt != 0) ambig.append(st.configs.uniqueAlt)
+    else for (a in st.configs.conflictingAlts) ambig.append(a)
+    val altToPred = filledArray(nalts + 1, semNull)
+    for (c in st.configs.items) {
+        val alt = configs.alt[c]
+        if (ambig.contains(alt)) {
+            while (altToPred.size <= alt) altToPred.append(semNull)
+            altToPred[alt] = sems.orContext(altToPred[alt], configs.sem[c])
+        }
+    }
+    var nPredAlts = 0
+    for (i in 1..nalts) {
+        if (altToPred[i] == semNull) altToPred[i] = semNone
+        else if (altToPred[i] != semNone) nPredAlts += 1
+    }
+    if (nPredAlts > 0) {
+        val pairs: array<int> = []
+        var containsPredicate = false
+        for (i in 1 until altToPred.size) {
+            val pred = altToPred[i]
+            if (ambig.contains(i)) {
+                pairs.append(pred)
+                pairs.append(i)
+            }
+            if (pred != semNone) containsPredicate = true
+        }
+        if (containsPredicate) {
+            st.hasPredicates = true
+            st.predicates = pairs
+            st.prediction = 0
+        } else st.prediction = minOf(ambig)
+    } else st.prediction = minOf(ambig)
+    return
+}
+
+fun Engine.computeTargetState(g: ParserGrammar, d: int, previous: int, t: int): int {
+    val reach = computeReachSet(g, copyInts(dfas[d].states[previous].configs.items), t, false)
+    var result = dfaError
+    if (reach.items.size == 0) setDfaEdge(g, d, previous, t, dfaError)
+    else {
+        val st = dfaState(reach)
+        val predicted = uniqueAlt(st.configs)
+        if (predicted != 0) {
+            st.isAccept = true
+            st.configs.uniqueAlt = predicted
+            st.prediction = predicted
+        } else if (hasSllConflictTerminatingPrediction(g, st.configs)) {
+            val alts = allAlts(st.configs)
+            st.configs.conflictingAlts = alts
+            conflictCounter += 1
+            st.configs.conflictId = conflictCounter
+            st.requiresFullContext = true
+            st.isAccept = true
+            st.prediction = minOf(st.configs.conflictingAlts)
+        }
+        if (st.isAccept && st.configs.hasSemanticContext) {
+            predicatesFor(g, d, st)
+            if (st.hasPredicates) st.prediction = 0
+        }
+        result = addDfaState(d, st)
+        setDfaEdge(g, d, previous, t, result)
+    }
+    result
+}
+
+fun Engine.evalSemanticContext(pairs: array<int>, complete: bool): array<int> {
+    val alts: array<int> = []
+    var stop = false
+    var i = 0
+    while (!stop && i < pairs.size) {
+        val pred = pairs[i]
+        val alt = pairs[i + 1]
+        if (pred == semNone) {
+            if (!alts.contains(alt)) alts.append(alt)
+            if (!complete) stop = true
+        } else if (evaluate(pred)) {
+            if (!alts.contains(alt)) alts.append(alt)
+            if (!complete) stop = true
+        }
+        i += 2
+    }
+    alts
+}
+
+fun Engine.altThatFinishedDecisionEntryRule(g: ParserGrammar, set: ConfigSet): int {
+    val alts: array<int> = []
+    for (c in set.items) {
+        val stop = g.atn.stateType[configs.state[c]] == stRuleStop && contexts.hasEmptyPath(configs.ctx[c])
+        if (configs.reach[c] > 0 || stop) {
+            if (!alts.contains(configs.alt[c])) alts.append(configs.alt[c])
+        }
+    }
+    if (alts.size == 0) 0 else minOf(alts)
+}
+
+fun Engine.synValidOrSemInvalidAlt(g: ParserGrammar, items: array<int>, fullCtx: bool): int {
+    val succeeded = configSet(fullCtx)
+    val failed = configSet(fullCtx)
+    for (c in items) {
+        if (configs.sem[c] != semNone) {
+            if (evaluate(configs.sem[c])) addConfig(succeeded, c, false) else addConfig(failed, c, false)
+        } else addConfig(succeeded, c, false)
+    }
+    var alt = altThatFinishedDecisionEntryRule(g, succeeded)
+    if (alt == 0 && failed.items.size > 0) alt = altThatFinishedDecisionEntryRule(g, failed)
+    alt
+}
+
+fun Engine.singleViableAlt(altsets: array<array<int>>): int {
+    var result = -1
+    var bad = false
+    for (alts in altsets) {
+        val m = minOf(alts)
+        if (result == -1) result = m
+        else if (result != m) bad = true
+    }
+    if (bad) 0 else result
+}
+
+fun Engine.execAtnWithFullContext(g: ParserGrammar, d: int, s0: ConfigSet, startIndex: int, outer: int): int {
+    seek(startIndex)
+    var t = la(1)
+    var previous = copyInts(s0.items)
+    val fullCtx = s0.fullCtx
+    var predicted = 0
+    var done = false
+    var result = 0
+    while (!done) {
+        val reach = computeReachSet(g, previous, t, true)
+        if (reach.items.size == 0) {
+            val offending = lt(1)
+            seek(startIndex)
+            val alt = synValidOrSemInvalidAlt(g, previous, fullCtx)
+            if (alt != 0) result = alt
+            else {
+                throwNoViableAlt(startIndex, offending, outer)
+                result = 0
+            }
+            done = true
+        } else {
+            val altSubSets = conflictingAltSubsets(reach)
+            reach.uniqueAlt = uniqueAlt(reach)
+            if (reach.uniqueAlt != 0) {
+                predicted = reach.uniqueAlt
+                done = true
+            } else {
+                predicted = singleViableAlt(altSubSets)
+                if (predicted != 0) done = true
+            }
+            if (done) result = predicted
+            else {
+                previous = copyInts(reach.items)
+                if (t != tokenEof) {
+                    streamConsume()
+                    t = la(1)
+                }
+            }
+        }
+    }
+    result
+}
+
+fun Engine.execAtn(g: ParserGrammar, d: int, s0: int, startIndex: int, outer: int): int {
+    var previous = s0
+    var t = la(1)
+    var result = 0
+    var done = false
+    while (!done) {
+        var target = existingTarget(d, previous, t)
+        if (target == dfaNone) target = computeTargetState(g, d, previous, t)
+        if (target == dfaError) {
+            val offending = lt(1)
+            seek(startIndex)
+            val alt = synValidOrSemInvalidAlt(g, copyInts(dfas[d].states[previous].configs.items), dfas[d].states[previous].configs.fullCtx)
+            if (alt != 0) result = alt
+            else throwNoViableAlt(startIndex, offending, outer)
+            done = true
+        } else if (dfas[d].states[target].requiresFullContext) {
+            var resolved = false
+            if (dfas[d].states[target].hasPredicates) {
+                val conflictIndex = index
+                if (conflictIndex != startIndex) seek(startIndex)
+                val alts = evalSemanticContext(copyInts(dfas[d].states[target].predicates), true)
+                if (alts.size == 1) {
+                    result = alts[0]
+                    resolved = true
+                } else if (conflictIndex != startIndex) seek(conflictIndex)
+            }
+            if (!resolved) {
+                val s0Closure = computeStartState(g, dfas[d].atnStartState, outer, true)
+                result = execAtnWithFullContext(g, d, s0Closure, startIndex, outer)
+            }
+            done = true
+        } else if (dfas[d].states[target].isAccept) {
+            if (!dfas[d].states[target].hasPredicates) result = dfas[d].states[target].prediction
+            else {
+                seek(startIndex)
+                val alts = evalSemanticContext(copyInts(dfas[d].states[target].predicates), true)
+                if (alts.size == 0) throwNoViableAlt(startIndex, lt(1), outer)
+                else result = minOf(alts)
+            }
+            done = true
+        } else {
+            previous = target
+            if (t != tokenEof) {
+                streamConsume()
+                t = la(1)
+            }
+        }
+    }
+    result
+}
+
+// Returns the predicted alternative, or 0 with exc set.
+fun Engine.adaptivePredict(g: ParserGrammar, d: int, outer: int): int {
+    val startIndex = index
+    predictStart = startIndex
+    predictOuter = outer
+    predictDfa = d
+    var s0 = dfaNone
+    val precedenceDfa = dfas[d].precedenceDfa
+    if (precedenceDfa) {
+        val p = precedence()
+        if (p >= 0 && p < dfas[d].precedenceStarts.size) s0 = dfas[d].precedenceStarts[p]
+    } else s0 = dfas[d].s0
+    if (s0 == dfaNone) {
+        val closure = computeStartState(g, dfas[d].atnStartState, -1, false)
+        if (precedenceDfa) {
+            val filtered = applyPrecedenceFilter(closure)
+            dfas[d].s0Configs = closure
+            s0 = addDfaState(d, dfaState(filtered))
+            val p = precedence()
+            if (p >= 0) {
+                while (dfas[d].precedenceStarts.size <= p) dfas[d].precedenceStarts.append(dfaNone)
+                dfas[d].precedenceStarts[p] = s0
+            }
+        } else {
+            s0 = addDfaState(d, dfaState(closure))
+            dfas[d].s0 = s0
+        }
+    }
+    val alt = execAtn(g, d, s0, startIndex, outer)
+    predictDfa = -1
+    contexts.endMergeCache()
+    seek(startIndex)
+    alt
+}

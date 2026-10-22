@@ -75,7 +75,8 @@ class Atn(
     val lexerActionType: array<int>,
     val lexerActionA: array<int>,
     val lexerActionB: array<int>,
-    val lexerActionCanon: array<int>
+    val lexerActionCanon: array<int>,
+    val error: string
 ) {
     fun stateCount(): int = stateType.size
 
@@ -198,8 +199,6 @@ fun readUuid(var r: AtnReader): string {
 val baseSerializedUuid = "AADB8D7E-AEEF-4415-AD2B-8204D6CF042E"
 val addedUnicodeSmp = "59627784-3BE5-417A-B9EB-8131A7286089"
 
-class AtnLoad(val atn: Atn?, val error: string)
-
 fun isBlockStartType(kind: int): bool = kind == stBlockStart || kind == stPlusBlockStart || kind == stStarBlockStart
 
 fun readSets(var r: AtnReader, var sets: array<IntervalSet>, wide: bool): void {
@@ -220,7 +219,9 @@ fun readSets(var r: AtnReader, var sets: array<IntervalSet>, wide: bool): void {
 
 // raw holds the serialized values (the integers between the brackets of an
 // .interp file's atn section, or the char codes of a generated parser's string).
-fun deserializeAtn(raw: array<int>): AtnLoad {
+fun failedAtn(message: string): Atn = Atn(-1, 0, [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], message)
+
+fun deserializeAtn(raw: array<int>): Atn {
     val data: array<int> = []
     for (i in 0 until raw.size) {
         val v = raw[i]
@@ -228,9 +229,9 @@ fun deserializeAtn(raw: array<int>): AtnLoad {
     }
     val r = AtnReader(data, 0)
     val version = r.next()
-    if (version != 3) return AtnLoad(null, "Could not deserialize ATN with version $version (expected 3).")
+    if (version != 3) return failedAtn("Could not deserialize ATN with version $version (expected 3).")
     val uuid = readUuid(r)
-    if (uuid != baseSerializedUuid && uuid != addedUnicodeSmp) return AtnLoad(null, "Could not deserialize ATN with UUID: $uuid")
+    if (uuid != baseSerializedUuid && uuid != addedUnicodeSmp) return failedAtn("Could not deserialize ATN with UUID: $uuid")
     val grammarType = r.next()
     val maxTokenType = r.next()
     val b = AtnBuilder([], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [])
@@ -321,7 +322,7 @@ fun deserializeAtn(raw: array<int>): AtnLoad {
         else if (ttype == trSet) b.addTransition(src, trSet, trg, arg1, 0, -1, false, -1, sets[arg1])
         else if (ttype == trNotSet) b.addTransition(src, trNotSet, trg, arg1, 0, -1, false, -1, sets[arg1])
         else if (ttype == trWildcard) b.addTransition(src, trWildcard, trg, 0, 0, -1, false, -1, null)
-        else return AtnLoad(null, "The specified transition type: $ttype is not valid.")
+        else return failedAtn("The specified transition type: $ttype is not valid.")
     }
     // rule stop states return to every follow state
     val nstatesNow = b.stateType.size
@@ -341,7 +342,7 @@ fun deserializeAtn(raw: array<int>): AtnLoad {
         val kind = b.stateType[s]
         if (isBlockStartType(kind)) {
             val end = b.endState[s]
-            if (end < 0 || b.startState[end] >= 0) return AtnLoad(null, "IllegalState")
+            if (end < 0 || b.startState[end] >= 0) return failedAtn("IllegalState")
             b.startState[end] = s
         }
         if (kind == stPlusLoopBack) {
@@ -406,9 +407,9 @@ fun deserializeAtn(raw: array<int>): AtnLoad {
         b.endState, b.startState, b.loopBackState, b.stopState, b.precedenceRule, b.precedenceDecision,
         b.transType, b.transTarget, b.transA, b.transB, b.transFollow, b.transFlag, b.transReturn, b.transLabel,
         ruleToStart, ruleToStop, ruleToTokenType, modeToStart, decisionToState,
-        lexerActionType, lexerActionA, lexerActionB, lexerActionCanon
+        lexerActionType, lexerActionA, lexerActionB, lexerActionCanon, ""
     )
-    AtnLoad(atn, "")
+    atn
 }
 
 // The sections of an .interp file.

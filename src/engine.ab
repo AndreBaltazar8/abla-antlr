@@ -1,0 +1,168 @@
+// Parser state: the token stream, the parse tree and the prediction caches.
+
+import "atn.ab"
+import "context.ab"
+import "semantic.ab"
+import "configs.ab"
+import "lexer.ab"
+import "grammar.ab"
+import "intervalset.ab"
+
+val excNone = 0
+val excNoViableAlt = 1
+val excInputMismatch = 2
+val excFailedPredicate = 3
+
+class SyntaxErr(val line: int, val column: int, val message: string)
+
+class Engine(
+    var contexts: ContextPool,
+    var sems: SemanticPool,
+    var configs: ConfigPool,
+    var dfas: array<Dfa>,
+    var tokens: Tokens,
+    var streamCount: int,
+    var index: int,
+    var ctxRule: array<int>,
+    var ctxParent: array<int>,
+    var ctxInvoking: array<int>,
+    var ctxStart: array<int>,
+    var ctxStop: array<int>,
+    var ctxAlt: array<int>,
+    var ctxChildren: array<array<int>>,
+    var cur: int,
+    var state: int,
+    var precStack: array<int>,
+    var recovering: bool,
+    var lastErrorIndex: int,
+    var lastErrorStates: array<int>,
+    var hasLastErrorStates: bool,
+    var exc: int,
+    var excStart: int,
+    var excOffending: int,
+    var excState: int,
+    var excCtx: int,
+    var excMessage: string,
+    var errors: array<SyntaxErr>,
+    var predictStart: int,
+    var predictOuter: int,
+    var predictDfa: int,
+    var conflictCounter: int,
+    var frameParent: array<int>,
+    var frameParentState: array<int>,
+    var frameStart: array<int>
+) {
+    // CommonTokenStream over the default channel
+
+    fun nextOnChannel(from: int): int {
+        var i = from
+        if (i >= streamCount) i = streamCount - 1
+        while (tokens.channel[i] != defaultChannel && tokens.type[i] != tokenEof) i += 1
+        i
+    }
+
+    fun previousOnChannel(from: int): int {
+        var i = from
+        while (i >= 0 && tokens.channel[i] != defaultChannel) i -= 1
+        i
+    }
+
+    fun seek(i: int): void {
+        index = nextOnChannel(i)
+    }
+
+    fun lt(k: int): int {
+        var result = -1
+        if (k > 0) {
+            var i = index
+            var n = 1
+            while (n < k) {
+                if (i + 1 < streamCount) i = nextOnChannel(i + 1)
+                n += 1
+            }
+            result = i
+        } else if (k < 0) {
+            if (index + k >= 0) {
+                var i = index
+                var n = 1
+                while (n <= -k) {
+                    i = previousOnChannel(i - 1)
+                    n += 1
+                }
+                if (i >= 0) result = i
+            }
+        }
+        result
+    }
+
+    fun la(k: int): int = tokens.type[lt(k)]
+
+    fun streamConsume(): void {
+        index = nextOnChannel(index + 1)
+    }
+
+    // parse tree
+
+    fun newContext(rule: int, parent: int, invoking: int): int {
+        val id = ctxRule.size
+        ctxRule.append(rule)
+        ctxParent.append(parent)
+        ctxInvoking.append(if (invoking == 0) -1 else invoking)
+        ctxStart.append(-1)
+        ctxStop.append(-1)
+        ctxAlt.append(0)
+        ctxChildren.append([])
+        id
+    }
+
+    fun addChild(parent: int, child: int): void {
+        ctxChildren[parent].append(child)
+    }
+
+    fun addTokenNode(token: int, error: bool): void {
+        ctxChildren[cur].append(if (error) -2 - 2 * token else -1 - 2 * token)
+    }
+
+    fun precedence(): int = if (precStack.size == 0) -1 else precStack[precStack.size - 1]
+
+    fun precpred(p: int): bool = p >= precStack[precStack.size - 1]
+
+    fun notify(msg: string, token: int): void {
+        errors.append(SyntaxErr(tokens.line[token], tokens.column[token], msg))
+    }
+
+    fun throwNoViableAlt(start: int, offending: int, ctx: int): bool {
+        exc = excNoViableAlt
+        excStart = start
+        excOffending = offending
+        excState = state
+        excCtx = ctx
+        false
+    }
+
+    fun throwInputMismatch(): bool {
+        exc = excInputMismatch
+        excOffending = lt(1)
+        excState = state
+        excCtx = cur
+        false
+    }
+
+    fun throwFailedPredicate(message: string): bool {
+        exc = excFailedPredicate
+        excOffending = lt(1)
+        excState = state
+        excCtx = cur
+        excMessage = message
+        false
+    }
+}
+
+fun engine(dfas: array<Dfa>): Engine = Engine(
+    contextPool(), semanticPool(), configPool(), dfas, tokens(), 0, 0,
+    [], [], [], [], [], [], [], -1, -1, [0],
+    false, -1, [], false,
+    excNone, -1, -1, -1, -1, "",
+    [], 0, -1, -1, 0,
+    [], [], []
+)
